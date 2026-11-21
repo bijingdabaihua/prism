@@ -1,4 +1,4 @@
-import type { Image } from '../../ir/image';
+import type { Image } from './image';
 
 /**
  * 环境光照的 GPU 侧。

@@ -1,7 +1,7 @@
-import type { AABB, Vec3 } from '../math/types';
-import type { PBRMaterial } from './material';
-import type { Image } from './image';
-import { sub, dot, cross, normalize } from '../math/vec3';
+import type { AABB, Vec3 } from '../../math/types';
+import type { PBRMaterial } from './material/material';
+import type { Image } from '../image';
+import { sub, dot, cross, normalize } from '../../math/vec3';
 
 /**
  * 网格 IR：几何 + 材质引用，不含任何 GPU 或加速结构。
@@ -24,12 +24,7 @@ import { sub, dot, cross, normalize } from '../math/vec3';
  * 此处只有声明，赋值在实现层。
  */
 export let Mesh: {
-    new (
-        vertexData: Float32Array,
-        triangleData: Uint32Array,
-        materials: readonly PBRMaterial[],
-        name?: string,
-    ): Mesh;
+    new (vertexData: Float32Array, triangleData: Uint32Array, materials: readonly PBRMaterial[], name?: string): Mesh;
 };
 
 /**
@@ -249,12 +244,7 @@ class MeshImpl implements Mesh {
     public readonly bounds: AABB;
     private evolved?: Mesh;
 
-    constructor(
-        vertexData: Float32Array,
-        triangleData: Uint32Array,
-        materials: readonly PBRMaterial[],
-        name?: string,
-    ) {
+    constructor(vertexData: Float32Array, triangleData: Uint32Array, materials: readonly PBRMaterial[], name?: string) {
         this.vertexData = vertexData;
         this.triangleData = triangleData;
         this.materials = materials;

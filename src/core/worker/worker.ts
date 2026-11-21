@@ -14,10 +14,10 @@
  */
 // 纯类型导入：消息协议和门面同文件，编译后这条边会完全擦除。
 import type { CameraCommand, WorkerRequest, WorkerResponse } from '../api/prism';
-import { WebGPUUnavailableError } from './engine/context';
-import { Engine } from './engine/engine';
-import { loadImage } from '../ir/image';
-import { Instance } from '../ir/instance';
+import { WebGPUUnavailableError } from './context';
+import { Engine } from './engine';
+import { loadImage } from './image';
+import { Instance } from './model/instance';
 
 /**
  * Worker 的运行态：一个引擎 + 一条串行队列。

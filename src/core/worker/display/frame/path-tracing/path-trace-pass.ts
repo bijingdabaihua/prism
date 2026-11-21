@@ -1,6 +1,6 @@
-import type { RenderContext } from '../../context';
+import type { RenderContext } from '../../engine/context';
 import type { Model } from '../../model/model';
-import type { Background } from '../../background';
+import type { Background } from '../../engine/background';
 import type { TextureSet } from '../../model/material/texture-set';
 import { buildPixelOrder } from './pixel-order';
 import structs from './structs.wgsl?raw';
@@ -162,11 +162,7 @@ export class PathTracePass {
         if (budgetMs <= 1) return;
 
         const ratio = Math.min(Math.max(budgetMs / samplingMs, 0.5), 2);
-        const next = Math.min(
-            Math.max(measuredDispatch * ratio, MIN_DISPATCH),
-            this.pixelCount,
-            MAX_DISPATCH,
-        );
+        const next = Math.min(Math.max(measuredDispatch * ratio, MIN_DISPATCH), this.pixelCount, MAX_DISPATCH);
         this.dispatchTarget = Math.max(1, Math.round(next));
     }
 
@@ -199,12 +195,7 @@ export class PathTracePass {
         // （几何 / 材质 / 实例 buffer 都换成了新的一批）。
         const envChanged = this.bindGroupEnvVersion !== bg.version();
         const modelChanged = this.bindGroupModelVersion !== this.model.version();
-        if (
-            !this.bindGroups[0] ||
-            this.bindGroupWriteViews[0] !== this.accumViews[0] ||
-            envChanged ||
-            modelChanged
-        ) {
+        if (!this.bindGroups[0] || this.bindGroupWriteViews[0] !== this.accumViews[0] || envChanged || modelChanged) {
             // 光照或场景变了，旧累积已经没有意义；首次建 bind group 时还没有样本
             if ((envChanged || modelChanged) && this.bindGroups[0]) this.requestReset();
             this.rebuildBindGroups();

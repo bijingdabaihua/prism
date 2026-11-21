@@ -1,8 +1,8 @@
-import type { Color } from '../math/types';
-import type { Image } from './image';
-import type { ZipArchive } from './zip';
-import { loadImage, loadTexture } from './image';
-import { contentCacheId, isAbsoluteUri, parseZip, readZipEntry, resolveZipPath, zipEntryUrl } from './zip';
+import type { Color } from '../../../math/types';
+import type { Image } from '../../image';
+import type { ZipArchive } from '../../zip';
+import { loadImage, loadTexture } from '../../image';
+import { contentCacheId, isAbsoluteUri, parseZip, readZipEntry, resolveZipPath, zipEntryUrl } from '../../zip';
 
 /**
  * 渲染器内部统一的材质表达。
@@ -492,11 +492,7 @@ class BlendFile {
  *
  * 返回 options 而不是 `PBRMaterial`：材质在实现层装配，这里只产出构造参数。
  */
-async function parseBlendMaterial(
-    zip: ZipArchive,
-    blend: BlendFile,
-    blendPath: string,
-): Promise<PBRMaterialOptions> {
+async function parseBlendMaterial(zip: ZipArchive, blend: BlendFile, blendPath: string): Promise<PBRMaterialOptions> {
     const baseDir = blendPath.substring(0, blendPath.lastIndexOf('/') + 1);
 
     // 节点块的 SDNA 结构都叫 bNode，具体是哪种节点看 idname 字段
@@ -591,12 +587,7 @@ function scalar(blend: BlendFile, node: Block, socketName: string): number | und
     return Number((blend.read(value, 'value') as number).toFixed(6));
 }
 
-function socketOf(
-    blend: BlendFile,
-    node: Block,
-    list: 'inputs' | 'outputs',
-    name: string,
-): Block | undefined {
+function socketOf(blend: BlendFile, node: Block, list: 'inputs' | 'outputs', name: string): Block | undefined {
     for (const s of blend.list(node, list)) {
         if ((blend.read(s, 'name') as string) === name) return s;
     }
@@ -736,8 +727,7 @@ class PBRMaterialImpl implements PBRMaterial {
     }
 
     public retile(meters: number): PBRMaterial {
-        const atScale = (img: Image | undefined): Image | undefined =>
-            img ? { ...img, meters } : undefined;
+        const atScale = (img: Image | undefined): Image | undefined => (img ? { ...img, meters } : undefined);
         return new PBRMaterialImpl({
             baseColor: this.baseColor,
             metallic: this.metallic,
@@ -757,12 +747,7 @@ class PBRMaterialImpl implements PBRMaterial {
 
     public withoutDisplacement(): PBRMaterial {
         if (!this.displacement) return this;
-        const {
-            displacement: _image,
-            displacementMid: _mid,
-            displacementScale: _scale,
-            ...rest
-        } = this;
+        const { displacement: _image, displacementMid: _mid, displacementScale: _scale, ...rest } = this;
         return new PBRMaterialImpl(rest);
     }
 }

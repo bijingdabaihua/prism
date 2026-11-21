@@ -5,8 +5,8 @@
  * `createModel(rpc)`，实现类不导出。
  */
 
-import { Instance } from '../ir/instance';
-import type { WireInstance } from '../ir/instance';
+import { Instance } from '../worker/model/instance';
+import type { WireInstance } from '../worker/model/instance';
 
 /**
  * 公开契约
@@ -76,7 +76,11 @@ class RpcModel implements ModelHandle {
     }
 
     public loadInstance(instance: Instance): Promise<void> {
-        return this.rpc.request<void>((id) => ({ type: 'model/loadInstance', id, instance: Instance.encode(instance) }));
+        return this.rpc.request<void>((id) => ({
+            type: 'model/loadInstance',
+            id,
+            instance: Instance.encode(instance),
+        }));
     }
 }
 

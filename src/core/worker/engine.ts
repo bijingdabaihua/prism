@@ -1,4 +1,4 @@
-import type { Instance } from '../../ir/instance';
+import type { Instance } from './model/instance';
 import type { RenderSurface } from './context';
 import { createDevice } from './context';
 import { Background } from './background';
