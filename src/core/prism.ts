@@ -1,24 +1,21 @@
 /**
  * core 的公共面：门面 + 主线程 RPC + 消息协议 + 错误。
  *
- * 四个句柄的契约和主线程实现分别在 `camera.ts` / `background.ts` /
- * `model.ts` / `scene.ts`；本文件只负责装配它们。主线程只从 `core/prism`
+ * 三个句柄的契约和主线程实现分别在 `camera.ts` / `background.ts` /
+ * `model.ts`；本文件只负责装配它们。主线程只从 `core/prism`
  * 拿东西；Worker 只从同一文件做纯类型导入，编译后不留下运行时依赖。
  */
 
 import type { BackgroundHandle, BackgroundRequest } from './background';
 import type { CameraHandle, CameraRequest } from './camera';
 import type { ModelHandle, ModelRequest } from './model';
-import type { SceneHandle, SceneRequest } from './scene';
 import { createBackground } from './background';
 import { createCamera } from './camera';
 import { createModel } from './model';
-import { createScene } from './scene';
 
 export type { BackgroundHandle } from './background';
 export type { CameraHandle, CameraSpec, ViewportSize } from './camera';
-export type { InstancePlacement, InstanceSpec, ModelHandle } from './model';
-export type { SceneHandle } from './scene';
+export type { InstancePlacement, ModelHandle } from './model';
 
 /**
  * 公开契约
@@ -30,18 +27,16 @@ export type { SceneHandle } from './scene';
 /**
  * 门面契约（实例侧）。
  *
- * 创建入口是 `Prism.create()`；实例只暴露四个只读句柄和 `dispose()`。
- * 四个句柄的契约分别在 `camera.ts` / `background.ts` / `model.ts` / `scene.ts`。
+ * 创建入口是 `Prism.create()`；实例只暴露三个只读句柄和 `dispose()`。
+ * 三个句柄的契约分别在 `camera.ts` / `background.ts` / `model.ts`。
  */
 export interface Prism {
     /** 观察者：机位控制。 */
     readonly camera: CameraHandle;
     /** 环境光照。 */
     readonly background: BackgroundHandle;
-    /** 模型资产：glTF 的字节入口。 */
+    /** 场景几何：glTF 字节 + 外部构造的 Instance 两个入口。 */
     readonly model: ModelHandle;
-    /** 场景配方：把多个资产和程序化几何装配成场景。 */
-    readonly scene: SceneHandle;
     /** 释放 Worker 和 GPU 设备；重复调用无副作用。 */
     dispose(): void;
 }
@@ -81,8 +76,7 @@ export type WorkerRequest =
     | { type: 'init'; id: number }
     | CameraRequest
     | BackgroundRequest
-    | ModelRequest
-    | SceneRequest;
+    | ModelRequest;
 
 /** Worker → 主线程。 */
 export type WorkerResponse =
@@ -96,10 +90,10 @@ export type WorkerResponse =
     | { type: 'frame'; bitmap: ImageBitmap };
 
 /**
- * 门面：起 Worker、装配四个句柄、管生命周期。
+ * 门面：起 Worker、装配三个句柄、管生命周期。
  *
- * 四个句柄的契约和主线程实现分别在 camera.ts / background.ts / model.ts /
- * scene.ts；这里只负责创建和持有。实际渲染跑在 Worker 里 —— 一个实例一个
+ * 三个句柄的契约和主线程实现分别在 camera.ts / background.ts / model.ts；
+ * 这里只负责创建和持有。实际渲染跑在 Worker 里 —— 一个实例一个
  * Worker、一个独立 GPUDevice，主线程从头到尾不碰 GPU。
  *
  * 业务层只认识这个门面。画面是相机的输出：`camera.listen(interval, cb)`
@@ -143,10 +137,8 @@ class PrismImpl implements Prism {
     public readonly camera: CameraHandle;
     /** 环境光照。 */
     public readonly background: BackgroundHandle;
-    /** 模型资产：glTF 的字节入口。 */
+    /** 场景几何：glTF 字节 + 外部构造的 Instance 两个入口。 */
     public readonly model: ModelHandle;
-    /** 场景配方：把多个资产和程序化几何装配成场景。 */
-    public readonly scene: SceneHandle;
     private disposed = false;
     private readonly rpc: RpcClient;
 
@@ -158,7 +150,6 @@ class PrismImpl implements Prism {
         this.camera = createCamera(rpc);
         this.background = createBackground(rpc);
         this.model = createModel(rpc);
-        this.scene = createScene(rpc);
     }
 
     /**

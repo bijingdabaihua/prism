@@ -1,15 +1,24 @@
 /**
- * 主线程环境光句柄：契约 + 实现。
+ * 主线程环境光句柄。
  *
- * Blob 交给 Worker 去解码、上传 —— 主线程只负责提供字节。
- * 创建入口是 `createBackground(rpc)`，实现类不导出。
+ * 本文件固定分两层，用横线隔开：
+ *   契约层 —— 全部导出：值的声明（构造入口，只有签名，不含实现）和类型
+ *             （对外契约、依赖面、被框架引用的形状）。读完本层即可掌握本模块；
+ *   实现层 —— 全部不导出：私有类型、私有类，并在这里给契约层的变量赋值。
+ *             契约不变，本层可任意重构。
+ *
+ * 规则：契约层必须全是导出；实现层必须全是不导出。
+ * 模块内不得重新赋值契约层的变量；导出对外本就只读（ESM）。
  */
 
+/* ──────────────────────────── 契约层 ──────────────────────────── */
+
 /**
- * 公开契约
- *
- * 以下类型和接口是对外 API。修改前先确认调用方影响。
+ * 构造主线程环境光句柄；返回的是契约接口，实现类不导出。
+ * Blob 交给 Worker 去解码、上传 —— 主线程只负责提供字节。
+ * 此处只有声明，赋值在实现层。
  */
+export let createBackground: (rpc: BackgroundRpc) => BackgroundHandle;
 
 /**
  * 环境光句柄 —— 环境图的远程入口。
@@ -28,24 +37,24 @@ export interface BackgroundHandle {
     setRotation(rotation: number): Promise<void>;
 }
 
-/** 主线程环境光句柄的工厂签名。具体实现放在文件末尾。 */
-export type BackgroundFactory = (rpc: BackgroundRpc) => BackgroundHandle;
+/**
+ * 环境光句柄依赖的最小 RPC 面：一次带返回值的请求。
+ * `build` 产出要发给 Worker 的请求消息（形状见本层 BackgroundRequest），
+ * 对契约层不透明。
+ */
+export interface BackgroundRpc {
+    request<T>(build: (id: number) => BackgroundRequest): Promise<T>;
+}
 
 /**
- * 实现
- *
- * 以下内容不属于公开契约：消息形状、RPC 依赖和句柄实现。
+ * 环境光相关的 Worker 消息报文。
+ * 报文形状不是对外契约，但 prism 的消息分发联合需要枚举它，因此导出、归本层。
  */
-
-/** 环境光相关的 Worker 消息。 */
 export type BackgroundRequest =
     | { type: 'background/setImage'; id: number; blob: Blob }
     | { type: 'background/setRotation'; id: number; rotation: number };
 
-/** 环境光句柄需要的最小 RPC 面：一次带返回值的请求。 */
-export interface BackgroundRpc {
-    request<T>(build: (id: number) => BackgroundRequest): Promise<T>;
-}
+/* ──────────────────────────── 实现层（不导出） ──────────────────────────── */
 
 /** 环境光句柄的主线程实现。 */
 class RpcBackground implements BackgroundHandle {
@@ -60,7 +69,5 @@ class RpcBackground implements BackgroundHandle {
     }
 }
 
-/** 主线程环境光句柄的工厂：实现类不导出。 */
-export const createBackground: BackgroundFactory = (rpc) => {
-    return new RpcBackground(rpc);
-};
+/** 契约层构造入口的赋值。 */
+createBackground = (rpc) => new RpcBackground(rpc);

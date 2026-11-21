@@ -11,6 +11,95 @@ export const INST_FLOATS = 36;
 const IDENTITY_MAT4: Readonly<Float32Array> = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
 /**
+ * Instance 的线上形态：主线程 `Instance.encode` → postMessage → Worker
+ * `Instance.decode`。
+ *
+ * IR 的类实例过不了线程边界 —— 结构化克隆只带走可枚举字段，方法全丢，而
+ * Worker 里 `engine.addInstances` → `Model.compile` 依赖 `evolve()` 这些方法。
+ * 所以跨线程的是这里的裸数据，Worker 收到后按原样重建类实例。
+ *
+ * - `Image` 本来就是纯数据 interface，线上直接复用；
+ * - 材质的线上形态就是 `PBRMaterialOptions`（构造参数的裸对象版）；
+ * - typed array（vertexData / triangleData / transform）克隆后类型不变，
+ *   解码时按类型校验。
+ */
+export interface WireMesh {
+    name?: string;
+    vertexData: Float32Array;
+    triangleData: Uint32Array;
+    materials: PBRMaterialOptions[];
+}
+
+export interface WireInstance {
+    mesh: WireMesh;
+    transform?: Float32Array;
+}
+
+/**
+ * 复活去重表：内容指纹 → Mesh。Worker 生命周期内只增不减，和本文件的
+ * `derivedBlobs` 一样是跨消息复用缓存。
+ */
+const decodedMeshes = new Map<string, Mesh>();
+
+/**
+ * Mesh 内容指纹（非密码学）。
+ *
+ * 用途是「字节一样的克隆体共用一份」，不是防篡改：全等字节必然同键；
+ * 区分不同内容靠长度 + 首尾部哈希 + 等距采样 + 材质标量 / 贴图元数据，
+ * 实用性上不可能撞。逐字节哈希 20 MB 级的顶点表要一秒级，采样是为此。
+ */
+function meshFingerprint(mesh: WireMesh): string {
+    const parts: string[] = [mesh.name ?? ''];
+    const sample = (view: ArrayBufferView): string => {
+        const u8 = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+        const head = fnv1a(u8.subarray(0, Math.min(1024, u8.length)));
+        const tail = u8.length > 1024 ? fnv1a(u8.subarray(u8.length - 1024)) : 0;
+        let stride = 0;
+        for (let i = 0; i < u8.length; i += 4096) {
+            stride = (stride * 31 + u8[i]) | 0;
+        }
+        return `${u8.length}:${head}:${tail}:${stride}`;
+    };
+    parts.push(sample(mesh.vertexData), sample(mesh.triangleData));
+    for (const m of mesh.materials) {
+        parts.push(
+            JSON.stringify([
+                m.baseColor,
+                m.metallic,
+                m.roughness,
+                m.normalScale,
+                m.occlusionStrength,
+                m.displacementMid,
+                m.displacementScale,
+            ]),
+        );
+        const tex = (img: unknown): string => {
+            if (!img || typeof img !== 'object') return '-';
+            const t = img as { data: Float32Array; width: number; height: number; meters?: number };
+            return `${sample(t.data)}:${t.width}x${t.height}:${t.meters ?? 1}`;
+        };
+        parts.push(
+            tex(m.baseColorTexture),
+            tex(m.metallicRoughnessTexture),
+            tex(m.roughnessTexture),
+            tex(m.normalTexture),
+            tex(m.occlusionTexture),
+            tex(m.displacement),
+        );
+    }
+    return parts.join('|');
+}
+
+function fnv1a(bytes: Uint8Array): number {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < bytes.length; i++) {
+        hash ^= bytes[i];
+        hash = Math.imul(hash, 0x01000193);
+    }
+    return hash >>> 0;
+}
+
+/**
  * Instance IR：一个 mesh 的一次摆放。
  *
  * 同一个 mesh 可以被多个 instance 引用 —— BLAS 应该按 mesh 共享，
@@ -93,6 +182,73 @@ export class Instance {
         const instances = buildInstances(doc, meshes);
 
         return instances;
+    }
+
+    /**
+     * 编码：Instance → 线上形态（`WireInstance`）。
+     *
+     * 真正的序列化由 postMessage（结构化克隆）完成；编码做的是划定线上形态 ——
+     * 显式挑出会过去的字段，deliberately 丢掉类身份和 `Mesh` 的演化缓存
+     * （`evolved` 是 Worker 侧的运行时缓存，不该从主线程带过来）。typed array
+     * 按引用交给克隆，不在这里拷贝。
+     */
+    public static encode(instance: Instance): WireInstance {
+        const mesh = instance.mesh;
+        return {
+            transform: instance.transform,
+            mesh: {
+                name: mesh.name,
+                vertexData: mesh.vertexData,
+                triangleData: mesh.triangleData,
+                // 展开成裸对象：字段一个不少（构造参数全在），原型不带过去
+                materials: mesh.materials.map((m) => ({ ...m })),
+            },
+        };
+    }
+
+    /**
+     * 解码：线上形态 → Instance。
+     *
+     * 收到的是克隆来的纯对象，先按形状校验，再用 IR 的构造函数复活：
+     * `Mesh` 构造会重算包围盒，`PBRMaterial` 构造会补默认值，`Instance` 构造
+     * 会拷贝变换。校验失败的错要能指认出「哪个字段不对」，而不是
+     * `undefined is not a function`。
+     *
+     * 复活按内容去重：同一份几何跨多条消息到达时（程序化地面一块砖一个
+     * Instance、逐条 loadInstance 推过来），结构化克隆跨消息不保共享引用，
+     * 9 块砖是 9 个不同对象 —— 而 BLAS 缓存 / 材质表 / 贴图层都按对象身份
+     * 去重。字节一样就只复活一份，身份恢复了那三层去重才工作。
+     */
+    public static decode(raw: unknown): Instance {
+        if (!raw || typeof raw !== 'object') {
+            throw new Error('实例数据不是对象');
+        }
+        const wire = raw as WireInstance;
+        if (!wire.mesh || typeof wire.mesh !== 'object') {
+            throw new Error('实例数据缺少 mesh');
+        }
+        if (wire.transform !== undefined && !(wire.transform instanceof Float32Array)) {
+            throw new Error('实例数据的 transform 不是 Float32Array');
+        }
+        const { vertexData, triangleData, materials } = wire.mesh;
+        if (!(vertexData instanceof Float32Array) || !(triangleData instanceof Uint32Array)) {
+            throw new Error('实例 mesh 的顶点 / 三角形数据缺失或类型不对');
+        }
+        if (!Array.isArray(materials)) {
+            throw new Error('实例 mesh 缺少材质表');
+        }
+        const key = meshFingerprint(wire.mesh);
+        let mesh = decodedMeshes.get(key);
+        if (!mesh) {
+            mesh = new Mesh(
+                vertexData,
+                triangleData,
+                materials.map((m) => new PBRMaterial(m)),
+                wire.mesh.name,
+            );
+            decodedMeshes.set(key, mesh);
+        }
+        return new Instance(mesh, wire.transform);
     }
 
     public transform: Float32Array;

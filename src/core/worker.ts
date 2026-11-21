@@ -5,20 +5,19 @@
  * Worker 自己建的 OffscreenCanvas，主线程从头到尾不碰 GPU。画面通过
  * `camera.listen()` 以 ImageBitmap 推回主线程 —— 每间隔最多一帧。
  *
- * 这里也是 core 唯一 import app/ 的地方：场景配方解释器
- * （`app/scenes/recipe`）从这里插进渲染器，其余 core 代码不认识任何具体场景。
- *
  * 运行态全部挂在 `WorkerHost` 一个实例上。消息语义沉到 Engine —— 机位命令和
  * 画面监听直接委托 `engine.camera`，环境图委托 `engine.background`，几何委托
  * `engine.addInstances`；顶层只留引擎本身、串行队列和回执。
+ *
+ * Worker 不认识任何具体场景：几何要么来自 glTF 字节（worker 里解码），要么
+ * 是主线程构造好 IR 推过来的裸数据（`Instance.decode` 复活）。
  */
 // 纯类型导入：消息协议和门面同文件，编译后这条边会完全擦除。
-import type { CameraCommand, InstanceSpec, WorkerRequest, WorkerResponse } from './prism';
+import type { CameraCommand, WorkerRequest, WorkerResponse } from './prism';
 import { WebGPUUnavailableError } from './engine/context';
 import { Engine } from './engine/engine';
 import { loadImage } from './ir/image';
-import { Instance, placeInstances } from './ir/instance';
-import { buildScene } from '../app/scenes/recipe';
+import { Instance } from './ir/instance';
 
 /**
  * Worker 的运行态：一个引擎 + 一条串行队列。
@@ -59,9 +58,6 @@ class WorkerHost {
                 return;
             case 'background/setRotation':
                 this.enqueue(() => this.setRotation(request.id, request.rotation));
-                return;
-            case 'scene/load':
-                this.enqueue(() => this.loadScene(request.id, request.source));
                 return;
             case 'model/loadGltf':
                 this.enqueue(() => this.loadGltf(request.id, request.source));
@@ -119,30 +115,6 @@ class WorkerHost {
     }
 
     /**
-     * 追加场景几何：配方 JSON → Instance → 交给引擎编译。
-     *
-     * 配方格式由 `app/scenes/recipe` 定义；core 只负责把字节解成 JSON。
-     * 机位和环境图不在这条消息里 —— 外部按自己的顺序调 `camera.set` /
-     * `background.setImage`，引擎等三者都到位才出图。
-     */
-    private async loadScene(id: number, source: Blob): Promise<void> {
-        try {
-            if (!this.engine) throw new Error('Prism 还没初始化');
-            const text = await source.text();
-            let recipe: unknown;
-            try {
-                recipe = JSON.parse(text);
-            } catch {
-                throw new Error('场景配方不是合法 JSON');
-            }
-            this.engine.addInstances(await buildScene(recipe));
-            this.reply(id, undefined);
-        } catch (err) {
-            this.failure(id, err instanceof Error ? err.message : String(err));
-        }
-    }
-
-    /**
      * 加载一个 glTF 文件里的全部 Instance，追加到当前场景。
      *
      * 与场景配方入口一样，最终都落到 `engine.addInstances`。模型入口都是
@@ -159,21 +131,17 @@ class WorkerHost {
     }
 
     /**
-     * 从 glTF 里取一个 Instance，按指定摆放编译。
+     * 追加一个外部构造好的 Instance。
      *
-     * 不摆放时保留文件里的节点变换；`index` 是 glTF 展开后的 Instance 顺序。
+     * 主线程用 `Instance.encode` 把 IR 编成裸数据发过来（类实例过不了线程
+     * 边界），这里 `Instance.decode` 校验并复活成 IR 类实例，再走同一条
+     * `engine.addInstances`。典型来源是程序化几何：地面这类东西在 app 侧
+     * 造好，不从 glTF 走。
      */
-    private async loadInstance(id: number, spec: InstanceSpec): Promise<void> {
+    private async loadInstance(id: number, wire: unknown): Promise<void> {
         try {
             if (!this.engine) throw new Error('Prism 还没初始化');
-            const instances = await Instance.buildByGltf(spec.source);
-            const index = spec.index ?? 0;
-            const instance = instances[index];
-            if (!instance) {
-                throw new Error(`glTF 里没有第 ${index} 个 Instance（共 ${instances.length} 个）`);
-            }
-            if (spec.placement) placeInstances([instance], spec.placement);
-            this.engine.addInstances([instance]);
+            this.engine.addInstances([Instance.decode(wire)]);
             this.reply(id, undefined);
         } catch (err) {
             this.failure(id, err instanceof Error ? err.message : String(err));

@@ -1,16 +1,39 @@
-import type { CameraSpec } from '../../core/prism';
-import type { SceneRecipe } from './recipe';
+import type { CameraSpec, InstancePlacement } from '../../core/prism';
 
 /**
- * 场景元数据：画廊卡片 + 外面装场景要用的机位 / 环境图 / 几何配方。
+ * 场景元数据：画廊卡片 + 外面装场景要用的机位 / 环境图 / 几何清单。
  *
- * 纯数据：不 import 任何场景构建器 / 导入器，配方类型也只做 type-only 导入。
- * 主线程（画廊、渲染页）读它时不会把 glTF / blend / 图像解码器打进首屏 chunk；
- * 解释配方的是 Worker 里的 `recipe.ts`。
+ * 纯数据：不 import 任何场景构建器 / 导入器。装配逻辑在 `assemble.ts`
+ * （渲染页才加载），清单本身画廊和渲染页都能安全读。
  *
  * 装场景的顺序由外部决定：先 `camera.set`，再 `background.setImage` /
- * `background.setRotation`，然后 `scene.load`，最后 `camera.listen`。
+ * `background.setRotation`，然后逐个装几何，最后 `camera.listen`。
  */
+
+/** 一片程序化地面：一块带位移材质的四边形按 `tile` 铺成网格。 */
+export interface TiledGroundGeometry {
+    type: 'tiled-ground';
+    /** `.blend` 材质 URL。 */
+    material: string;
+    /** 一格贴图覆盖的真实尺寸（米），也是砖边长。 */
+    tile: number;
+    /** 砖心范围（米）。 */
+    x0: number;
+    x1: number;
+    z0: number;
+    z1: number;
+}
+
+/** 一个 glTF 资产包：整包进来；给 `placement` 时由外部解析后按摆放追加。 */
+export interface GltfGeometry {
+    type: 'gltf';
+    /** `.gltf` / `.glb` / `.zip` 资产包 URL。 */
+    url: string;
+    /** 省略 = 保留文件里的变换。 */
+    placement?: InstancePlacement;
+}
+
+export type SceneGeometry = TiledGroundGeometry | GltfGeometry;
 
 /** 渲染器需要、几何之外的场景参数。 */
 export interface SceneSetup {
@@ -31,8 +54,8 @@ export interface SceneCard {
     /** 画廊封面；缺省时卡片显示占位底纹。放在 assets/gallery/<key>.png */
     cover?: string;
     setup: SceneSetup;
-    /** 几何配方；交给 Worker 后由 `app/scenes/recipe.ts` 解释。 */
-    geometry: SceneRecipe;
+    /** 几何清单；按顺序交给 `assemble.ts` 装配。 */
+    geometry: SceneGeometry[];
 }
 
 /**
@@ -83,40 +106,38 @@ const VASE_CAMERA: CameraSpec = {
 /**
  * 荒地的几何：3×3 块 2.11 m 的砂土地砖 + 青花瓷罐 + 枯枝。
  *
- * 这里只放数据；怎么把 glTF 和程序化地面变成 Instance 是 `recipe.ts` 的事。
+ * 这里只放数据；glTF 打成 zip 资产包，装配是 `assemble.ts` 的事。
  */
-const VASE_ON_DIRT_GEOMETRY: SceneRecipe = {
-    objects: [
-        {
-            type: 'tiled-ground',
-            material: '/textures/forest_ground_06/forest_ground_06.blend',
-            // 一格贴图 2.11 m；砖心落在 ±2.11，铺出来正好 3×3 块、6.33 m 见方。
-            tile: 2.11,
-            x0: -2.11,
-            x1: 2.11,
-            z0: -2.11,
-            z1: 2.11,
+const VASE_ON_DIRT_GEOMETRY: SceneGeometry[] = [
+    {
+        type: 'tiled-ground',
+        material: '/textures/forest_ground_06/forest_ground_06.blend',
+        // 一格贴图 2.11 m；砖心落在 ±2.11，铺出来正好 3×3 块、6.33 m 见方。
+        tile: 2.11,
+        x0: -2.11,
+        x1: 2.11,
+        z0: -2.11,
+        z1: 2.11,
+    },
+    {
+        type: 'gltf',
+        url: '/model/antique_ceramic_vase_01_1k.zip',
+        // 罐子正对原点：底面就在 y = 0，直接坐在砂土上。
+        placement: { position: { x: 0, y: 0, z: 0 }, rotationY: 0.4 },
+    },
+    {
+        type: 'gltf',
+        url: '/model/dead_quiver_branch_01_1k.zip',
+        // 枯枝躺在地上：绕 X 放倒 90°，再绕 Y 转 22° 斜着躺进画面右下角。
+        // 抬 9 cm 是因为放倒之后最低点（原来是 −z 方向的那一侧）在 y = −0.097，
+        // 少抬 7 mm 让它陷进土里一点，别像搁在玻璃上。
+        placement: {
+            position: { x: 0.04, y: 0.09, z: -0.27 },
+            rotationX: -Math.PI / 2,
+            rotationY: 0.38,
         },
-        {
-            type: 'gltf',
-            url: '/model/antique_ceramic_vase_01/antique_ceramic_vase_01_1k.gltf',
-            // 罐子正对原点：底面就在 y = 0，直接坐在砂土上。
-            placement: { position: { x: 0, y: 0, z: 0 }, rotationY: 0.4 },
-        },
-        {
-            type: 'gltf',
-            url: '/model/dead_quiver_branch_01/dead_quiver_branch_01_1k.gltf',
-            // 枯枝躺在地上：绕 X 放倒 90°，再绕 Y 转 22° 斜着躺进画面右下角。
-            // 抬 9 cm 是因为放倒之后最低点（原来是 −z 方向的那一侧）在 y = −0.097，
-            // 少抬 7 mm 让它陷进土里一点，别像搁在玻璃上。
-            placement: {
-                position: { x: 0.04, y: 0.09, z: -0.27 },
-                rotationX: -Math.PI / 2,
-                rotationY: 0.38,
-            },
-        },
-    ],
-};
+    },
+];
 
 export const SCENE_CARDS: Readonly<Record<string, SceneCard>> = {
     'vase-on-dirt': {

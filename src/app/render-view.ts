@@ -1,5 +1,6 @@
 import { Prism, PrismUnsupportedError } from '../core/prism';
 import { SCENE_CARDS } from './scenes/catalog';
+import { fetchBlob, loadGeometry } from './scenes/assemble';
 
 /** 场景编译完之后，再给 Worker 这么久把画面铺满，然后撤 loading。 */
 const LOADING_HOLD_MS = 1500;
@@ -162,17 +163,14 @@ export class RenderView {
             const card = SCENE_CARDS[this.key];
             if (!card) throw new Error(`没有场景 "${this.key}"`);
 
-            // 场景由外面一步一步装：机位 → 环境图 + 朝向 → 几何配方 → 开始监听
+            // 场景由外面一步一步装：机位 → 环境图 + 朝向 → 逐个装几何 → 开始监听
             this.updateLoading('Loading scene...');
             prism.camera.set(card.setup.camera);
             // 环境图以 Blob 交给 Worker：主线程只取字节，解码仍留在 Worker
             // setImage 从原图方向建好；场景需要别的朝向时再由 setRotation 转
             await prism.background.setImage(await fetchBlob(card.setup.env));
             await prism.background.setRotation(card.setup.envRotation ?? 0);
-            // 配方也走 Blob：core 只传字节，格式由 Worker 里的 app/scenes 解释
-            await prism.scene.load(
-                new Blob([JSON.stringify(card.geometry)], { type: 'application/json' }),
-            );
+            await loadGeometry(prism.model, card.geometry);
             if (this.disposed) {
                 prism.dispose();
                 return;
@@ -280,12 +278,6 @@ export class RenderView {
         this.prism?.camera.pan(dx, dy);
     }
 
-}
-
-async function fetchBlob(url: string): Promise<Blob> {
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`Failed to load ${url} (${resp.status})`);
-    return resp.blob();
 }
 
 function touchDistance(e: TouchEvent): number {

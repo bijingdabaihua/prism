@@ -5,6 +5,9 @@
  * `createModel(rpc)`，实现类不导出。
  */
 
+import { Instance } from './ir/instance';
+import type { WireInstance } from './ir/instance';
+
 /**
  * 公开契约
  *
@@ -22,26 +25,12 @@ export interface InstancePlacement {
 }
 
 /**
- * 从 glTF 里取一个 Instance 编译。
- *
- * glTF 的一个节点展开成一个 Instance；`index` 指的是展开后的顺序。
- */
-export interface InstanceSpec {
-    /**
-     * 一个 glTF 资产包的字节：自包含 `.glb`、资源内嵌的 `.gltf`，或带
-     * `.bin` / 贴图的 `.zip`。ZIP 在 Worker 里解包，主线程只负责取字节。
-     */
-    source: Blob;
-    /** 取第几个 Instance；省略 = 0。 */
-    index?: number;
-    /** 省略 = 保留 glTF 文件里的变换。 */
-    placement?: InstancePlacement;
-}
-
-/**
  * 模型句柄 —— 场景几何的远程入口。
  *
- * 文件解码、位移、BVH 全在 Worker 里；这边只递资产字节。
+ * 两个入口，语义都是追加到当前场景，不是替换：
+ * - `loadGltf` 递资产包字节，解码成 Instance 全在 Worker；
+ * - `loadInstance` 递 app 在主线程构造好的 IR Instance（如程序化地面），
+ *   句柄侧编码成线上形态（`ir/wire.ts`），Worker 解码复活后再编译。
  */
 export interface ModelHandle {
     /**
@@ -50,15 +39,16 @@ export interface ModelHandle {
      * `source` 是资产包字节：自包含 `.glb`、内嵌资源的 `.gltf`，或带
      * `.bin` / 贴图的 `.zip`。URL 也由调用方自己 fetch 成 Blob 再传进来 ——
      * 主线程只递字节，解析和解包都在 Worker。
-     * 结果是追加到当前场景，不是替换。
      */
     loadGltf(source: Blob): Promise<void>;
     /**
-     * 从 glTF 资产包里取一个 Instance，按 `placement` 摆放后追加到场景。
+     * 追加一个外部构造好的 Instance。
      *
-     * 外部可以连续调用它，把同一个或不同资产包里的节点一个一个摆进来。
+     * 典型用途是程序化几何（`MeshBuilder` 铺的地面等）：几何和材质在主线程
+     * 造好，跨线程时由 `Instance.encode` 编成裸数据，Worker 侧 `Instance.decode`
+     * 复活成 IR 类实例。贴图字段须是解码后的 `Image`（IR 里不留文件路径）。
      */
-    loadInstance(instance: InstanceSpec): Promise<void>;
+    loadInstance(instance: Instance): Promise<void>;
 }
 
 /**
@@ -70,7 +60,7 @@ export interface ModelHandle {
 /** 模型相关的 Worker 消息。 */
 export type ModelRequest =
     | { type: 'model/loadGltf'; id: number; source: Blob }
-    | { type: 'model/loadInstance'; id: number; instance: InstanceSpec };
+    | { type: 'model/loadInstance'; id: number; instance: WireInstance };
 
 /** 模型句柄需要的最小 RPC 面：一次带返回值的请求。 */
 export interface ModelRpc {
@@ -85,8 +75,8 @@ class RpcModel implements ModelHandle {
         return this.rpc.request<void>((id) => ({ type: 'model/loadGltf', id, source }));
     }
 
-    public loadInstance(instance: InstanceSpec): Promise<void> {
-        return this.rpc.request<void>((id) => ({ type: 'model/loadInstance', id, instance }));
+    public loadInstance(instance: Instance): Promise<void> {
+        return this.rpc.request<void>((id) => ({ type: 'model/loadInstance', id, instance: Instance.encode(instance) }));
     }
 }
 
