@@ -1,10 +1,10 @@
-import type { Camera } from '../camera';
-import type { Model } from '../../model/model';
-import type { Background } from '../../background/background';
-import type { RenderContext } from '../context';
+import type { Camera } from './camera';
+import type { Model } from '../model/model';
+import type { Background } from '../background/background';
+import type { RenderContext } from './context';
 import { GpuTimer } from './gpu-timer';
 import { PathTracePass } from './path-tracing/path-trace-pass';
-import { DisplayPass } from '../display/display-pass';
+import { DisplayPass } from './display/display-pass';
 
 /**
  * 一帧的提交单元。

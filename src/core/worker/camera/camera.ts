@@ -3,7 +3,7 @@ import type { RenderSurface } from './context';
 import type { Model } from '../model/model';
 import type { Background } from '../background/background';
 import { RenderContext } from './context';
-import { Frame } from './frame/frame';
+import { Frame } from './frame';
 import { RenderLoop } from './loop';
 import { vec3, normalize, cross, sub, add, scale } from '../../math/vec3';
 import { Mat4 } from '../../math/mat4';
