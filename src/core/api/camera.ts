@@ -20,8 +20,8 @@ export interface ViewportSize {
 /**
  * 观察模型：绕 target 的轨道相机。
  *
- * 这是本渲染器的机位语义，不是 ir/CameraView 的拷贝 —— 结构一样只是巧合，
- * 业务契约不跟着 IR 变。
+ * 机位语义有两份：这份是业务契约（跟随 api），Worker 引擎里的 CameraView
+ * 是场景描述（跟随引擎）。目前结构一样，各自演化，不互相引用。
  */
 export interface CameraSpec {
     target: { x: number; y: number; z: number };
