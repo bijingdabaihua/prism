@@ -1,10 +1,10 @@
-import type { CameraView } from '../worker/camera-view';
+import type { CameraView } from '../worker/camera';
 
 /**
  * 主线程相机句柄：契约 + 实现。
  *
  * Worker 里的 `../worker/camera.ts` 才是真的机位；这边只把方法翻成消息。
- * 机位报文形状用共享的 `CameraView`（见 `../worker/camera-view.ts`），
+ * 机位报文形状用本文件 re-export 的共享 `CameraView`（定义在 `../worker/camera.ts`），
  * 两边只有一份定义。创建入口是 `createCamera(rpc)`，实现类不导出。
  */
 
@@ -14,7 +14,7 @@ import type { CameraView } from '../worker/camera-view';
  * 以下类型和接口是对外 API。修改前先确认调用方影响。
  */
 
-export type { CameraView } from '../worker/camera-view';
+export type { CameraView } from '../worker/camera';
 
 /** 渲染视口尺寸（物理像素 = CSS 尺寸 × devicePixelRatio）。 */
 export interface ViewportSize {
