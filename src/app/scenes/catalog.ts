@@ -1,4 +1,4 @@
-import type { CameraSpec, InstancePlacement } from '../../core/api/prism';
+import type { CameraView, InstancePlacement } from '../../core/api/prism';
 
 /**
  * 场景元数据：画廊卡片 + 外面装场景要用的机位 / 环境图 / 几何清单。
@@ -38,7 +38,7 @@ export type SceneGeometry = TiledGroundGeometry | GltfGeometry;
 /** 渲染器需要、几何之外的场景参数。 */
 export interface SceneSetup {
     /** 构图。换一套机位就是另一张图，所以它是场景的一部分。 */
-    camera: CameraSpec;
+    camera: CameraView;
     /** 环境图 URL；渲染页取成 Blob 交给 Worker 解码。 */
     env: string;
     /** 环境图绕 +y 的旋转（弧度），省略 = 原图方向。 */
@@ -89,7 +89,7 @@ const SUN_ROTATION = ENV_ROTATION + 0.6;
  *
  * phi 是从 +Y 量的极角：64.2° 时相机水平退开 1.48 m、抬起 0.72 m。
  */
-const VASE_CAMERA: CameraSpec = {
+const VASE_CAMERA: CameraView = {
     target: { x: 0, y: 0.22, z: -0.10 },
     distance: 1.646,
     theta: 0.0,

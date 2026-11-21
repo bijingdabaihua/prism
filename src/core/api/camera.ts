@@ -1,8 +1,11 @@
+import type { CameraView } from '../worker/camera-view';
+
 /**
  * 主线程相机句柄：契约 + 实现。
  *
- * Worker 里的 `engine/camera.ts` 才是真的机位；这边只把方法翻成消息。
- * 创建入口是 `createCamera(rpc)`，实现类不导出。
+ * Worker 里的 `../worker/camera.ts` 才是真的机位；这边只把方法翻成消息。
+ * 机位报文形状用共享的 `CameraView`（见 `../worker/camera-view.ts`），
+ * 两边只有一份定义。创建入口是 `createCamera(rpc)`，实现类不导出。
  */
 
 /**
@@ -11,32 +14,12 @@
  * 以下类型和接口是对外 API。修改前先确认调用方影响。
  */
 
+export type { CameraView } from '../worker/camera-view';
+
 /** 渲染视口尺寸（物理像素 = CSS 尺寸 × devicePixelRatio）。 */
 export interface ViewportSize {
     width: number;
     height: number;
-}
-
-/**
- * 观察模型：绕 target 的轨道相机。
- *
- * 机位语义有两份：这份是业务契约（跟随 api），Worker 引擎里的 CameraView
- * 是场景描述（跟随引擎）。目前结构一样，各自演化，不互相引用。
- */
-export interface CameraSpec {
-    target: { x: number; y: number; z: number };
-    /** 相机到 target 的距离（米，轨道半径）。 */
-    distance: number;
-    /** 水平角，π/2 表示从 +z 方向看过来。 */
-    theta: number;
-    /** 俯仰角，π/2 是水平视线，越小相机越高。 */
-    phi: number;
-    /** 垂直视野角，弧度。 */
-    fovY: number;
-    /** 入射光瞳半径（米）。省略或 0 = 针孔。 */
-    apertureRadius?: number;
-    /** 对焦距离（米）。需要和 apertureRadius 一起给才生效。 */
-    focusDistance?: number;
 }
 
 /**
@@ -55,7 +38,7 @@ export interface CameraHandle {
      * 外部装场景的顺序通常是 `set` → `background.setImage` /
      * `background.setRotation` → `scene.load`；装载几何不会改机位。
      */
-    set(spec: CameraSpec): void;
+    set(spec: CameraView): void;
     /**
      * 回到场景自带的机位；还没装场景时回到内置的默认机位
      * （原点、5 m 远、水平视线、垂直视野 60°）。
@@ -89,7 +72,7 @@ export interface CameraHandle {
 
 /** 机位命令：全部是「照做」的写操作，没有返回值。 */
 export type CameraCommand =
-    | { type: 'set'; spec: CameraSpec }
+    | { type: 'set'; spec: CameraView }
     | { type: 'reset' }
     | { type: 'resize'; size: ViewportSize }
     | { type: 'orbit'; deltaTheta: number; deltaPhi: number }
@@ -119,7 +102,7 @@ class RpcCamera implements CameraHandle {
 
     constructor(private readonly rpc: CameraRpc) {}
 
-    public set(spec: CameraSpec): void {
+    public set(spec: CameraView): void {
         this.rpc.send({ type: 'camera', command: { type: 'set', spec } });
     }
 

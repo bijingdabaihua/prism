@@ -1,8 +1,8 @@
-import type { Instance } from '../../../ir/instance';
-import type { Mesh } from '../../../ir/mesh';
+import type { Instance } from './instance';
+import type { Mesh } from './mesh';
 import type { TextureSet } from './material/texture-set';
-import { INST_FLOATS } from '../../../ir/instance';
-import { Mat4 } from '../../../math/mat4';
+import { INST_FLOATS } from './instance';
+import { Mat4 } from '../../math/mat4';
 import { buildBvh, meshBlas } from './bvh';
 import { MaterialStore } from './material/material-store';
 

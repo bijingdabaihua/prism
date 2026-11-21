@@ -1,4 +1,4 @@
-import type { PBRMaterial } from '../../../../ir/material';
+import type { PBRMaterial } from './material';
 
 /**
  * IR → GPU 定长布局的打包。

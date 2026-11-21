@@ -1,5 +1,5 @@
-import type { AABB, Vec3 } from '../../../math/types';
-import type { Mesh } from '../../../ir/mesh';
+import type { AABB, Vec3 } from '../../math/types';
+import type { Mesh } from './mesh';
 
 class BvhNode {
     public bounds: AABB;

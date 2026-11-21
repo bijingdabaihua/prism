@@ -14,7 +14,7 @@ import { createCamera } from './camera';
 import { createModel } from './model';
 
 export type { BackgroundHandle } from './background';
-export type { CameraHandle, CameraSpec, ViewportSize } from './camera';
+export type { CameraHandle, CameraView, ViewportSize } from './camera';
 export type { InstancePlacement, ModelHandle } from './model';
 
 /**
