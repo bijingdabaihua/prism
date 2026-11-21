@@ -9,9 +9,9 @@ import { MeshBuilder } from '../../core/ir/mesh';
  * 一张平面铺不出这个场景：低机位下画面顶端几乎贴着地平线，一片 1 m 见方的
  * 板 2 m 外就被看见边了。所以这里是「一块地砖 + 实例化」，见 `buildTiledGround`。
  *
- * 材质全在 `.blend` 里 —— 四张贴图、色彩空间、法线强度、位移的 Midlevel /
- * Scale 都是作者填的。这里只给一个文件读不出来的数：一格贴图多大（Poly Haven
- * 把它放在网页 API 的 `dimensions` 里，不在 .blend 中）。
+ * 材质全在压缩包里（`.blend` + 贴图目录）—— 四张贴图、色彩空间、法线强度、
+ * 位移的 Midlevel / Scale 都是作者填的。这里只给一个文件读不出来的数：一格
+ * 贴图多大（Poly Haven 把它放在网页 API 的 `dimensions` 里，不在 .blend 中）。
  *
  * 位移是材质的属性，不是几何的属性：这里只铺一张平的四边形，细分和抬起
  * 由 `Mesh.evolve` 在编译时做。

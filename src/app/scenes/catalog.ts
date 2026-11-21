@@ -13,7 +13,7 @@ import type { CameraSpec, InstancePlacement } from '../../core/api/prism';
 /** 一片程序化地面：一块带位移材质的四边形按 `tile` 铺成网格。 */
 export interface TiledGroundGeometry {
     type: 'tiled-ground';
-    /** `.blend` 材质 URL。 */
+    /** 材质压缩包 URL（zip：内嵌 `.blend` + 贴图目录）。 */
     material: string;
     /** 一格贴图覆盖的真实尺寸（米），也是砖边长。 */
     tile: number;
@@ -111,7 +111,7 @@ const VASE_CAMERA: CameraSpec = {
 const VASE_ON_DIRT_GEOMETRY: SceneGeometry[] = [
     {
         type: 'tiled-ground',
-        material: '/textures/forest_ground_06/forest_ground_06.blend',
+        material: '/textures/forest_ground_06.zip',
         // 一格贴图 2.11 m；砖心落在 ±2.11，铺出来正好 3×3 块、6.33 m 见方。
         tile: 2.11,
         x0: -2.11,
