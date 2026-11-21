@@ -32,9 +32,13 @@ function groundQuad(x0: number, x1: number, z0: number, z1: number): [Vec3, Vec3
  *
  * `tileSize` 是一格贴图覆盖的真实尺寸（米）：荒地用的是 2.11 m，来自资产接口
  * `dimensions` = [2109.99, 2109.99] mm。它同时决定 UV 缩放和砖边长。
+ * 材质从 Poly Haven 的压缩包构造，这个数文件里读不出来 —— 构造好后用
+ * `retile` 矫正。
  */
-export function loadGroundMaterial(url: string, tileSize: number): Promise<PBRMaterial> {
-    return PBRMaterial.buildByBlend(url, tileSize);
+export async function loadGroundMaterial(url: string, tileSize: number): Promise<PBRMaterial> {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`Failed to load ${url} (${resp.status})`);
+    return (await PBRMaterial.buildByBlend(await resp.blob())).retile(tileSize);
 }
 
 /**

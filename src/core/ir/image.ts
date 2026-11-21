@@ -7,16 +7,24 @@ import type { TextureKind } from './material';
  * 与来源格式无关的、解码后的线性浮点数据。所有格式（.hdr / .exr / .png / .jpg …）
  * 的唯一出口都是它，渲染侧只认这个类型，所以看不出源文件是什么格式。
  *
+ * 解码器在实现层：`loadImage` 是任意来源的入口，`loadTexture` 是材质贴图的
+ * 入口。这里是**唯一**允许知道「.exr / .hdr / .png」存在的地方 ——
+ * 新增一种格式 = 加一个 decodeXxx + 在 sniff 里认一下 magic，渲染层一行不动。
+ *
+ * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 CODE_STYLE.md。
+ */
+
+// ══════════════════════════ 契约层（导出） ══════════════════════════
+
+/**
+ * 场景 IR 里的图像。
+ *
  * 约定：
  * - 数据是**线性**光值，不是 sRGB 编码值。显示编码在 GPU 编译层再做。
  * - 数值未归一化，可以大于 1（HDR 环境图的辐照度本来就 > 1）。
  * - layout 区分两种用途：equirect 是等距柱状环境图（宽高比 2:1），
  *   texture 是可以平铺的 2D 贴图。将来要支持 cubemap，就在这里加变体，
  *   而不是改渲染层。
- *
- * 解码器就在这个文件末尾：`loadImage` 是任意来源的入口，`loadTexture` 是材质
- * 贴图的入口。这里是**唯一**允许知道「.exr / .hdr / .png」存在的地方 ——
- * 新增一种格式 = 加一个 decodeXxx + 在 sniff 里认一下 magic，渲染层一行不动。
  */
 export interface Image {
     readonly width: number;
@@ -35,9 +43,7 @@ export interface Image {
     readonly meters?: number;
 }
 
-// 导入器
-
-interface ImageOptions {
+export interface ImageOptions {
     /**
      * 位图是否按 sRGB 解码成线性。颜色贴图为 true（默认）；
      * 法线、粗糙度这类**数据贴图**必须为 false —— 它们的数值不是颜色，
@@ -53,10 +59,25 @@ interface ImageOptions {
 /**
  * 任意来源的图像入口：URL 由内部 fetch，Blob 直接读字节。
  *
- * 格式识别和解码始终在这一层完成 —— 调用方只需要给来源，不需要知道
+ * 格式识别和解码始终在实现层完成 —— 调用方只需要给来源，不需要知道
  * 它是 EXR、HDR 还是位图。
  */
-export async function loadImage(source: string | Blob, options?: ImageOptions): Promise<Image> {
+export let loadImage: (source: string | Blob, options?: ImageOptions) => Promise<Image>;
+
+/**
+ * 材质贴图的解码与去重。
+ *
+ * PBRMaterial 的贴图字段是解码后的 Image，所以解码发生在导入器里 —— 也就是
+ * 这里，用户代码在造材质时 await 它。同一张图（同 kind + 同 URL）只解码一次，
+ * 返回同一个 Image 对象：TextureSet 按对象身份去重图层，重复解码会多占一层。
+ *
+ * 颜色贴图按 sRGB 解码，法线 / 粗糙度 / AO 保持原始数值。
+ */
+export let loadTexture: (url: string, kind: TextureKind, meters?: number) => Promise<Image>;
+
+// ══════════════════════════ 实现层（不导出） ══════════════════════════
+
+loadImage = async (source, options) => {
     let buf: ArrayBuffer;
     if (typeof source === 'string') {
         const resp = await fetch(source);
@@ -71,7 +92,7 @@ export async function loadImage(source: string | Blob, options?: ImageOptions): 
         layout: options?.layout ?? image.layout,
         meters: options?.meters ?? image.meters,
     };
-}
+};
 
 const IS_COLOR: Record<TextureKind, boolean> = {
     albedo: true,
@@ -82,16 +103,7 @@ const IS_COLOR: Record<TextureKind, boolean> = {
 
 const textureCache = new Map<string, Promise<Image>>();
 
-/**
- * 材质贴图的解码与去重。
- *
- * PBRMaterial 的贴图字段是解码后的 Image，所以解码发生在导入器里 —— 也就是
- * 这里，用户代码在造材质时 await 它。同一张图（同 kind + 同 URL）只解码一次，
- * 返回同一个 Image 对象：TextureSet 按对象身份去重图层，重复解码会多占一层。
- *
- * 颜色贴图按 sRGB 解码，法线 / 粗糙度 / AO 保持原始数值。
- */
-export function loadTexture(url: string, kind: TextureKind, meters?: number): Promise<Image> {
+loadTexture = (url, kind, meters) => {
     // 一格几米进缓存键：同一张图配不同的尺度，得是不同的 Image。
     const key = `${kind}:${url}:${meters ?? 1}`;
     let job = textureCache.get(key);
@@ -100,7 +112,7 @@ export function loadTexture(url: string, kind: TextureKind, meters?: number): Pr
         textureCache.set(key, job);
     }
     return job;
-}
+};
 
 // 解码
 

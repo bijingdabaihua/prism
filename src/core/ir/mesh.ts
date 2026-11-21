@@ -4,6 +4,118 @@ import type { Image } from './image';
 import { sub, dot, cross, normalize } from '../math/vec3';
 
 /**
+ * 网格 IR：几何 + 材质引用，不含任何 GPU 或加速结构。
+ *
+ * BLAS 是派生数据（buildMeshBvh），属于 compile 层，不放进 IR。
+ * 唯一的例外是 `Mesh.evolve` —— 它把材质上的位移贴图烘成真几何，理由见接口注释。
+ *
+ * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 CODE_STYLE.md。
+ */
+
+// ══════════════════════════ 契约层（导出） ══════════════════════════
+
+/**
+ * Mesh 的类绑定：从已经打包好的顶点 / 三角形数据构造一个网格。
+ *
+ * vertexData 交错排布：pos(3) + normal(3) + uv(2) + tangent(4) = 12 floats/vertex；
+ * triangleData 每个三角形 4 个 uint32：v0, v1, v2, matIdx。包围盒由顶点自动算出。
+ * 程序化构造走 `MeshBuilder`。
+ *
+ * 此处只有声明，赋值在实现层。
+ */
+export let Mesh: {
+    new (
+        vertexData: Float32Array,
+        triangleData: Uint32Array,
+        materials: readonly PBRMaterial[],
+        name?: string,
+    ): Mesh;
+};
+
+/**
+ * 网格 IR：几何 + 材质引用，不含任何 GPU 或加速结构。
+ *
+ * BLAS 是派生数据（buildMeshBvh），属于 compile 层，不放进 IR。
+ *
+ * 唯一的例外是 `evolve()` —— 它把材质上的位移贴图烘成真几何。位移贴图是
+ * 材质的运行时属性（导入器 / 场景作者给），而「一块几何长什么样」必须在这里
+ * 定下来：BVH、包围盒、实例摆放读到的都得是已经演化过的顶点。
+ */
+export interface Mesh {
+    /** 显示用名字（文件名或场景内标签），不参与任何计算 */
+    readonly name?: string;
+    /** 交错排布：pos(3) + normal(3) + uv(2) + tangent(4) = 12 floats/vertex */
+    readonly vertexData: Float32Array;
+    /** 每个三角形 4 个 uint32：v0, v1, v2, matIdx */
+    readonly triangleData: Uint32Array;
+    /** 这个 mesh 用到的 PBR 材质（triangleData 里的 matIdx 指向这里） */
+    readonly materials: readonly PBRMaterial[];
+    /** 局部空间 AABB */
+    readonly bounds: AABB;
+
+    /**
+     * 演化：把材质上的位移贴图消耗掉，返回可以直接进渲染的 mesh。
+     *
+     * 有位移贴图的三角形按图上一个 texel 一格的密度细分成网格、顶点按材质的
+     * 零点和刻度抬起，法线按高度场重新求；没有的三角形一个顶点都不动。返回的
+     * mesh 上，那些材质是删掉 `displacement` 的副本 —— 上 GPU 的材质里不再有
+     * 位移贴图。
+     *
+     * 结果缓存在 mesh 上：同一个 mesh 的多个 instance 共享一份演化结果，
+     * 也就共享同一棵 BLAS。没有位移的 mesh 原样返回（=== 自己）。
+     */
+    evolve(): Mesh;
+}
+
+/**
+ * MeshBuilder 的类绑定：构造一个空的程序化几何构造器。
+ *
+ * 此处只有声明，赋值在实现层。
+ */
+export let MeshBuilder: {
+    new (): MeshBuilder;
+};
+
+/**
+ * 程序化场景：不经过任何文件，直接在代码里构造 Instance。
+ *
+ * 用它当渲染管线的基准场景 —— 画面不对时可以直接排除 OBJ 解析。
+ */
+export interface MeshBuilder {
+    /**
+     * 四边形。UV 以**米**为单位（沿 a→b 和面内垂直方向），
+     * 所以贴图的重复次数只由贴图自己的一格几米（`Image.meters`）决定，与四边形多大无关 ——
+     * 一面 8 m 的墙和一块 1 m 的面用同一个材质，贴图密度是连续的。
+     *
+     * `uv` 给了就改用给定的投影取坐标。默认的「沿边」在折起来的面上会换轴：
+     * 地面折成土坡那一刻，贴图方向跟着折 90°，图案在缝上错位。
+     */
+    addQuad(corners: [Vec3, Vec3, Vec3, Vec3], material: number, uv?: UvProjection): void;
+
+    /**
+     * 轴对齐立方体：中心在原点，边长 size（米），六个面各一个四边形。
+     *
+     * 只用来做占位 / 管线自检 —— 一个没有贴图的盒子，光照、阴影、法线
+     * 是不是对的，一眼就能看出来。
+     */
+    addBox(size: number, material: number): void;
+
+    /** 打包成 Mesh。顶点不跨四边形共享。 */
+    build(materials: readonly PBRMaterial[], name?: string): Mesh;
+}
+
+/** 贴图坐标（米）：顶点的 u/v = 到原点的位移在这两根轴上的投影。 */
+export interface UvProjection {
+    origin: Vec3;
+    /** 单位向量：贴图的 u 方向 */
+    uAxis: Vec3;
+    /** 单位向量：贴图的 v 方向 */
+    vAxis: Vec3;
+}
+
+// ══════════════════════════ 实现层（不导出） ══════════════════════════
+
+/**
  * 材质上的位移拆成两份：图 + 两个刻度（零点、每格几米）。格距不用给 —— 它由图自己定。
  *
  * 图上一个 texel 覆盖 `meters / width` 米，取它当细分格距：再多切就是采同一个
@@ -129,29 +241,20 @@ function sampleDisplacement(image: Image, u: number, v: number, mid: number, sca
     return (sampleHeight(image, u / meters, v / meters) - mid) * scale;
 }
 
-/**
- * Mesh IR：几何 + 材质引用，不含任何 GPU 或加速结构。
- *
- * BLAS 是派生数据（buildMeshBvh），属于 compile 层，不放进 IR。
- *
- * 唯一的例外是 `evolve()` —— 它把材质上的位移贴图烘成真几何。位移贴图是
- * 材质的运行时属性（导入器 / 场景作者给），而「一块几何长什么样」必须在这里
- * 定下来：BVH、包围盒、实例摆放读到的都得是已经演化过的顶点。
- */
-export class Mesh {
-    /** 显示用名字（文件名或场景内标签），不参与任何计算 */
+class MeshImpl implements Mesh {
     public readonly name?: string;
-    /** 交错排布：pos(3) + normal(3) + uv(2) + tangent(4) = 12 floats/vertex */
     public readonly vertexData: Float32Array;
-    /** 每个三角形 4 个 uint32：v0, v1, v2, matIdx */
     public readonly triangleData: Uint32Array;
-    /** 这个 mesh 用到的 PBR 材质（triangleData 里的 matIdx 指向这里） */
     public readonly materials: readonly PBRMaterial[];
-    /** 局部空间 AABB */
     public readonly bounds: AABB;
     private evolved?: Mesh;
 
-    constructor(vertexData: Float32Array, triangleData: Uint32Array, materials: readonly PBRMaterial[], name?: string) {
+    constructor(
+        vertexData: Float32Array,
+        triangleData: Uint32Array,
+        materials: readonly PBRMaterial[],
+        name?: string,
+    ) {
         this.vertexData = vertexData;
         this.triangleData = triangleData;
         this.materials = materials;
@@ -159,16 +262,6 @@ export class Mesh {
         this.bounds = computeBounds(vertexData);
     }
 
-    /**
-     * 演化：把材质上的位移贴图消耗掉，返回可以直接进渲染的 mesh。
-     *
-     * 有位移贴图的三角形按图上一个 texel 一格的密度细分成网格、顶点按材质的
-     * 零点和刻度抬起，法线按高度场重新求；没有的三角形一个顶点都不动。返回的 mesh 上，
-     * 那些材质是删掉 `displacement` 的副本 —— 上 GPU 的材质里不再有位移贴图。
-     *
-     * 结果缓存在 mesh 上：同一个 mesh 的多个 instance 共享一份演化结果，
-     * 也就共享同一棵 BLAS。没有位移的 mesh 原样返回（=== 自己）。
-     */
     public evolve(): Mesh {
         if (!this.materials.some((m) => m.displacement)) return this;
         if (!this.evolved) this.evolved = evolveMesh(this);
@@ -204,7 +297,7 @@ function evolveMesh(mesh: Mesh): Mesh {
         tessellate(vd, ia, ib, ic, mat, displacement, verts, tris);
     }
 
-    return new Mesh(new Float32Array(verts), new Uint32Array(tris), materials, mesh.name);
+    return new MeshImpl(new Float32Array(verts), new Uint32Array(tris), materials, mesh.name);
 }
 
 /**
@@ -361,23 +454,7 @@ function computeBounds(vertexData: Float32Array): AABB {
     return { min, max };
 }
 
-// 程序化几何
-
-/** 贴图坐标（米）：顶点的 u/v = 到原点的位移在这两根轴上的投影。 */
-interface UvProjection {
-    origin: Vec3;
-    /** 单位向量：贴图的 u 方向 */
-    uAxis: Vec3;
-    /** 单位向量：贴图的 v 方向 */
-    vAxis: Vec3;
-}
-
-/**
- * 程序化场景：不经过任何文件，直接在代码里构造 Instance。
- *
- * 用它当渲染管线的基准场景 —— 画面不对时可以直接排除 OBJ 解析。
- */
-export class MeshBuilder {
+class MeshBuilderImpl implements MeshBuilder {
     private positions: number[] = [];
     private normals: number[] = [];
     private uvs: number[] = [];
@@ -386,14 +463,6 @@ export class MeshBuilder {
     private triMaterials: number[] = [];
     private vertexCount = 0;
 
-    /**
-     * 四边形。UV 以**米**为单位（沿 a→b 和面内垂直方向），
-     * 所以贴图的重复次数只由贴图自己的一格几米（`Image.meters`）决定，与四边形多大无关 ——
-     * 一面 8 m 的墙和一块 1 m 的面用同一个材质，贴图密度是连续的。
-     *
-     * `uv` 给了就改用给定的投影取坐标。默认的「沿边」在折起来的面上会换轴：
-     * 地面折成土坡那一刻，贴图方向跟着折 90°，图案在缝上错位。
-     */
     public addQuad(corners: [Vec3, Vec3, Vec3, Vec3], material: number, uv?: UvProjection): void {
         const [a, b, c, d] = corners;
         const e1 = sub(b, a);
@@ -413,12 +482,6 @@ export class MeshBuilder {
         this.pushTriangle(base, base + 2, base + 3, material);
     }
 
-    /**
-     * 轴对齐立方体：中心在原点，边长 size（米），六个面各一个四边形。
-     *
-     * 只用来做占位 / 管线自检 —— 一个没有贴图的盒子，光照、阴影、法线
-     * 是不是对的，一眼就能看出来。
-     */
     public addBox(size: number, material: number): void {
         const h = size * 0.5;
         const v = (x: number, y: number, z: number): Vec3 => ({ x: x * h, y: y * h, z: z * h });
@@ -462,7 +525,7 @@ export class MeshBuilder {
             triangleData[o + 3] = this.triMaterials[t];
         }
 
-        return new Mesh(vertexData, triangleData, materials, name);
+        return new MeshImpl(vertexData, triangleData, materials, name);
     }
 
     private pushVertex(p: Vec3, n: Vec3, u: number, v: number, t: Vec3): void {
@@ -478,3 +541,7 @@ export class MeshBuilder {
         this.triMaterials.push(material);
     }
 }
+
+/** 契约层类绑定的赋值。 */
+Mesh = MeshImpl;
+MeshBuilder = MeshBuilderImpl;

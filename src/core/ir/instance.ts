@@ -6,17 +6,108 @@ import { PBRMaterial } from './material';
 import { Mesh } from './mesh';
 import { loadTexture } from './image';
 
-export const INST_FLOATS = 36;
+/**
+ * Instance IR：一个 mesh 的一次摆放，以及它的线上编解码和 glTF 导入器。
+ *
+ * 编解码跨线程：IR 的类实例过不了线程边界 —— 结构化克隆只带走可枚举字段，
+ * 方法全丢，而 Worker 里 `engine.addInstances` → `Model.compile` 依赖
+ * `evolve()` 这些方法。所以跨线程的是 `WireInstance` 裸数据，Worker 收到后
+ * 按原样重建类实例。
+ *
+ * glTF 2.0 的解析器在实现层，由 `Instance.buildByGltf` 驱动：一个文件里的
+ * 节点树在那里展开成若干 Instance。
+ *
+ * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 CODE_STYLE.md。
+ */
 
-const IDENTITY_MAT4: Readonly<Float32Array> = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+// ══════════════════════════ 契约层（导出） ══════════════════════════
+
+/**
+ * Instance 的类绑定：构造一个实例（mesh + 变换）；静态方法 `buildByGltf`
+ * 从 glTF 导入，`encode` / `decode` 是跨线程编解码。
+ *
+ * 此处只有声明，赋值在实现层。
+ */
+export let Instance: {
+    /**
+     * 构造：拷贝 transform（缺省单位阵）。mesh 不拷贝 —— 多个 instance
+     * 共享同一份几何，BLAS 按 mesh 建而不是按 instance 建。
+     */
+    new (mesh: Mesh, transform?: Float32Array): Instance;
+
+    /**
+     * 读一个 glTF 文件（.gltf + 外链资源，或 .glb 单文件），返回若干可加入
+     * 场景的 Instance。解析代码在实现层。
+     *
+     * 一个文件可能包含多个节点，每个节点一次摆放 —— 所以返回的是数组，
+     * 调用方要把它们当成一个整体来摆放，而不是逐个摆放。
+     *
+     * URL 会同时给出外链资源的 base；Blob 没有 base，所以适合自包含
+     * `.glb`、资源全部内嵌的 `.gltf`，或者把 `.gltf` / `.bin` / 贴图
+     * 一起装起来的 `.zip`。ZIP 会在 Worker 里解包，外链路径改写成
+     * 内存里的 blob URL，后面仍按同一套外链流程读。
+     *
+     * 材质已经在 Mesh 里了（贴图解码成 Image）：导入器交出的就是 IR 里
+     * 能直接交给引擎的东西，没有第二份「结果」需要调用方再拼。
+     *
+     * 支持的范围见实现层导入器的说明。
+     */
+    buildByGltf(source: string | Blob): Promise<Instance[]>;
+
+    /**
+     * 编码：Instance → 线上形态（`WireInstance`）。
+     *
+     * 真正的序列化由 postMessage（结构化克隆）完成；编码做的是划定线上形态 ——
+     * 显式挑出会过去的字段，deliberately 丢掉类身份和 `Mesh` 的演化缓存
+     * （`evolved` 是 Worker 侧的运行时缓存，不该从主线程带过来）。typed array
+     * 按引用交给克隆，不在这里拷贝。
+     */
+    encode(instance: Instance): WireInstance;
+
+    /**
+     * 解码：线上形态 → Instance。
+     *
+     * 收到的是克隆来的纯对象，先按形状校验，再用 IR 的构造函数复活：
+     * `Mesh` 构造会重算包围盒，`PBRMaterial` 构造会补默认值，`Instance` 构造
+     * 会拷贝变换。校验失败的错要能指认出「哪个字段不对」，而不是
+     * `undefined is not a function`。
+     *
+     * 复活按内容去重：同一份几何跨多条消息到达时（程序化地面一块砖一个
+     * Instance、逐条 loadInstance 推过来），结构化克隆跨消息不保共享引用，
+     * 9 块砖是 9 个不同对象 —— 而 BLAS 缓存 / 材质表 / 贴图层都按对象身份
+     * 去重。字节一样就只复活一份，身份恢复了那三层去重才工作。
+     */
+    decode(raw: unknown): Instance;
+};
+
+/**
+ * Instance IR：一个 mesh 的一次摆放。
+ *
+ * 同一个 mesh 可以被多个 instance 引用 —— BLAS 应该按 mesh 共享，
+ * 而不是每个 instance 复制一份。
+ *
+ * 逆矩阵是派生数据，打包时现算（engine/model/model.ts），不存进 IR。
+ */
+export interface Instance {
+    /** 列主序 4×4 世界变换。公开可写：摆位（placeInstances）直接改它。 */
+    transform: Float32Array;
+    readonly mesh: Mesh;
+
+    /**
+     * 演化：让 mesh 把材质上的位移贴图消耗掉，返回可以直接进渲染的 instance。
+     *
+     * 没有位移的 mesh 原样返回（`===` 自己），变换照抄；演化结果缓存在 mesh 上，
+     * 所以同一个 mesh 摆很多次也只算一遍、共用一棵 BLAS。
+     */
+    evolve(): Instance;
+
+    /** 变换后的世界空间 AABB（包围盒的 8 个角逐个过变换）。 */
+    getBounds(): { min: Vec3; max: Vec3 };
+}
 
 /**
  * Instance 的线上形态：主线程 `Instance.encode` → postMessage → Worker
  * `Instance.decode`。
- *
- * IR 的类实例过不了线程边界 —— 结构化克隆只带走可枚举字段，方法全丢，而
- * Worker 里 `engine.addInstances` → `Model.compile` 依赖 `evolve()` 这些方法。
- * 所以跨线程的是这里的裸数据，Worker 收到后按原样重建类实例。
  *
  * - `Image` 本来就是纯数据 interface，线上直接复用；
  * - 材质的线上形态就是 `PBRMaterialOptions`（构造参数的裸对象版）；
@@ -33,6 +124,188 @@ export interface WireMesh {
 export interface WireInstance {
     mesh: WireMesh;
     transform?: Float32Array;
+}
+
+/**
+ * 实例在 scene-instances SSBO 里的记录尺寸（float 数）：BLAS 基址 1 +
+ * 变换 16 + 逆变换 16 = 33，对齐填充到 36。打包见 engine/model/model.ts。
+ */
+export const INST_FLOATS = 36;
+
+export interface Placement {
+    position: Vec3;
+    /**
+     * 绕 X 轴，弧度。先于 `rotationY` 应用。
+     *
+     * glTF 里站着的模型要躺下，只能绕水平轴放倒 —— 只绕 Y 转永远躺不平。
+     * 先绕 X 放倒、再绕 Y 摆方向，和手里拿个东西摆位置时的手感一致。
+     */
+    rotationX?: number;
+    /** 绕 Y 轴，弧度。0 表示模型朝向不变。 */
+    rotationY?: number;
+    scale?: number;
+}
+
+/**
+ * 按作者指定的位置/朝向/缩放摆放一组实例，组内相对关系保持不变。
+ *
+ * 贴图和模型都按米导出，所以 scale 一般给 1 —— 只有在模型尺寸明显不对时
+ * 才调它，而不是拿它凑构图。
+ */
+export let placeInstances: (instances: readonly Instance[], p: Placement) => void;
+
+// ══════════════════════════ 实现层（不导出） ══════════════════════════
+
+const IDENTITY_MAT4: Readonly<Float32Array> = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+
+class InstanceImpl implements Instance {
+    public static async buildByGltf(source: string | Blob): Promise<Instance[]> {
+        let buf: ArrayBuffer;
+        let baseUrl = '';
+        let label = 'glTF Blob';
+        const isUrl = typeof source === 'string';
+        if (isUrl) {
+            const resp = await fetch(source);
+            if (!resp.ok) throw new Error(`Failed to load glTF: ${source} (${resp.status})`);
+            buf = await resp.arrayBuffer();
+            baseUrl = source.substring(0, source.lastIndexOf('/') + 1);
+            label = source;
+        } else {
+            buf = await source.arrayBuffer();
+        }
+        // 内容指纹：Blob 被结构化克隆后对象身份会变，按内容算才能让同一份
+        // 资产在多次加载里复用解压结果和贴图层。
+        const cacheId = contentCacheId(buf);
+        if (!isUrl) {
+            // 非 zip Blob 没有目录基准；给内嵌图片一个不会和其他 Blob 撞的键
+            baseUrl = `blob:${cacheId}/`;
+        }
+
+        // ZIP 只在这一层展开：模型文件取出来继续走 glTF 解析，外链资源
+        // 改写成稳定复用的 blob URL —— 下游的 loadBuffers / loadTexture
+        // 不需要知道它来自压缩包。
+        const zip = isZip(buf) ? parseZip(buf, label, cacheId) : null;
+        let modelPath = '';
+        if (zip) {
+            modelPath = pickZipModel(zip);
+            const model = await readZipEntry(zip, modelPath);
+            buf = toArrayBuffer(model);
+            const dir = modelPath.substring(0, modelPath.lastIndexOf('/') + 1);
+            baseUrl = `zip:${cacheId}/${dir}`;
+            label = `${label} (${modelPath})`;
+        }
+
+        const { doc, bin } = parseContainer(buf, label);
+        if (zip) await rewriteZipUris(doc, zip, modelPath);
+        const buffers = await loadBuffers(doc, bin, baseUrl, label);
+
+        const ctx: LoadContext = {
+            doc,
+            buffers,
+            baseUrl,
+            textureUrls: new Map(),
+            imageUrls: new Map(),
+            occlusionUrls: new Map(),
+        };
+
+        const materials = await Promise.all((doc.materials ?? []).map((m) => convertMaterial(m, ctx)));
+        const meshes = doc.meshes.map((m, i) => buildMesh(ctx, m, materials, `gltf-mesh-${i}`));
+        const instances = buildInstances(doc, meshes);
+
+        return instances;
+    }
+
+    public static encode(instance: Instance): WireInstance {
+        const mesh = instance.mesh;
+        return {
+            transform: instance.transform,
+            mesh: {
+                name: mesh.name,
+                vertexData: mesh.vertexData,
+                triangleData: mesh.triangleData,
+                // 展开成裸对象：字段一个不少（构造参数全在），原型不带过去
+                materials: mesh.materials.map((m) => ({ ...m })),
+            },
+        };
+    }
+
+    public static decode(raw: unknown): Instance {
+        if (!raw || typeof raw !== 'object') {
+            throw new Error('实例数据不是对象');
+        }
+        const wire = raw as WireInstance;
+        if (!wire.mesh || typeof wire.mesh !== 'object') {
+            throw new Error('实例数据缺少 mesh');
+        }
+        if (wire.transform !== undefined && !(wire.transform instanceof Float32Array)) {
+            throw new Error('实例数据的 transform 不是 Float32Array');
+        }
+        const { vertexData, triangleData, materials } = wire.mesh;
+        if (!(vertexData instanceof Float32Array) || !(triangleData instanceof Uint32Array)) {
+            throw new Error('实例 mesh 的顶点 / 三角形数据缺失或类型不对');
+        }
+        if (!Array.isArray(materials)) {
+            throw new Error('实例 mesh 缺少材质表');
+        }
+        const key = meshFingerprint(wire.mesh);
+        let mesh = decodedMeshes.get(key);
+        if (!mesh) {
+            mesh = new Mesh(
+                vertexData,
+                triangleData,
+                materials.map((m) => new PBRMaterial(m)),
+                wire.mesh.name,
+            );
+            decodedMeshes.set(key, mesh);
+        }
+        return new InstanceImpl(mesh, wire.transform);
+    }
+
+    public transform: Float32Array;
+    public readonly mesh: Mesh;
+
+    constructor(mesh: Mesh, transform?: Float32Array) {
+        this.mesh = mesh;
+        this.transform = transform ? new Float32Array(transform) : new Float32Array(IDENTITY_MAT4);
+    }
+
+    public evolve(): Instance {
+        const mesh = this.mesh.evolve();
+        return mesh === this.mesh ? this : new InstanceImpl(mesh, this.transform);
+    }
+
+    public getBounds(): { min: Vec3; max: Vec3 } {
+        const b = this.mesh.bounds;
+        const t = this.transform;
+        const corners = [
+            { x: b.min.x, y: b.min.y, z: b.min.z },
+            { x: b.max.x, y: b.min.y, z: b.min.z },
+            { x: b.min.x, y: b.max.y, z: b.min.z },
+            { x: b.max.x, y: b.max.y, z: b.min.z },
+            { x: b.min.x, y: b.min.y, z: b.max.z },
+            { x: b.max.x, y: b.min.y, z: b.max.z },
+            { x: b.min.x, y: b.max.y, z: b.max.z },
+            { x: b.max.x, y: b.max.y, z: b.max.z },
+        ];
+        let minX = Infinity,
+            minY = Infinity,
+            minZ = Infinity;
+        let maxX = -Infinity,
+            maxY = -Infinity,
+            maxZ = -Infinity;
+        for (const c of corners) {
+            const x = t[0] * c.x + t[4] * c.y + t[8] * c.z + t[12];
+            const y = t[1] * c.x + t[5] * c.y + t[9] * c.z + t[13];
+            const z = t[2] * c.x + t[6] * c.y + t[10] * c.z + t[14];
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+            if (z < minZ) minZ = z;
+            if (z > maxZ) maxZ = z;
+        }
+        return { min: { x: minX, y: minY, z: minZ }, max: { x: maxX, y: maxY, z: maxZ } };
+    }
 }
 
 /**
@@ -97,211 +370,6 @@ function fnv1a(bytes: Uint8Array): number {
         hash = Math.imul(hash, 0x01000193);
     }
     return hash >>> 0;
-}
-
-/**
- * Instance IR：一个 mesh 的一次摆放。
- *
- * 同一个 mesh 可以被多个 instance 引用 —— BLAS 应该按 mesh 共享，
- * 而不是每个 instance 复制一份。
- *
- * 逆矩阵是派生数据，打包时现算（engine/model/model.ts），不存进 IR。
- *
- * glTF 2.0 的解析器就在这个文件末尾，由 `buildByGltf` 驱动：一个文件里的
- * 节点树在这里展开成若干 Instance。
- */
-export class Instance {
-    /**
-     * 读一个 glTF 文件（.gltf + 外链资源，或 .glb 单文件），返回若干可加入
-     * 场景的 Instance。解析代码在这个文件末尾。
-     *
-     * 一个文件可能包含多个节点，每个节点一次摆放 —— 所以返回的是数组，
-     * 调用方要把它们当成一个整体来摆放，而不是逐个摆放。
-     *
-     * URL 会同时给出外链资源的 base；Blob 没有 base，所以适合自包含
-     * `.glb`、资源全部内嵌的 `.gltf`，或者把 `.gltf` / `.bin` / 贴图
-     * 一起装起来的 `.zip`。ZIP 会在 Worker 里解包，外链路径改写成
-     * 内存里的 blob URL，后面仍按同一套外链流程读。
-     *
-     * 材质已经在 Mesh 里了（贴图解码成 Image）：导入器交出的就是 IR 里
-     * 能直接交给引擎的东西，没有第二份「结果」需要调用方再拼。
-     *
-     * 支持的范围见文件末尾的导入器说明。
-     */
-    public static async buildByGltf(source: string | Blob): Promise<Instance[]> {
-        let buf: ArrayBuffer;
-        let baseUrl = '';
-        let label = 'glTF Blob';
-        const isUrl = typeof source === 'string';
-        if (isUrl) {
-            const resp = await fetch(source);
-            if (!resp.ok) throw new Error(`Failed to load glTF: ${source} (${resp.status})`);
-            buf = await resp.arrayBuffer();
-            baseUrl = source.substring(0, source.lastIndexOf('/') + 1);
-            label = source;
-        } else {
-            buf = await source.arrayBuffer();
-        }
-        // 内容指纹：Blob 被结构化克隆后对象身份会变，按内容算才能让同一份
-        // 资产在多次加载里复用解压结果和贴图层。
-        const cacheId = contentCacheId(buf);
-        if (!isUrl) {
-            // 非 zip Blob 没有目录基准；给内嵌图片一个不会和其他 Blob 撞的键
-            baseUrl = `blob:${cacheId}/`;
-        }
-
-        // ZIP 只在这一层展开：模型文件取出来继续走 glTF 解析，外链资源
-        // 改写成稳定复用的 blob URL —— 下游的 loadBuffers / loadTexture
-        // 不需要知道它来自压缩包。
-        const zip = isZip(buf) ? parseZip(buf, label, cacheId) : null;
-        let modelPath = '';
-        if (zip) {
-            modelPath = pickZipModel(zip);
-            const model = await readZipEntry(zip, modelPath);
-            buf = toArrayBuffer(model);
-            const dir = modelPath.substring(0, modelPath.lastIndexOf('/') + 1);
-            baseUrl = `zip:${cacheId}/${dir}`;
-            label = `${label} (${modelPath})`;
-        }
-
-        const { doc, bin } = parseContainer(buf, label);
-        if (zip) await rewriteZipUris(doc, zip, modelPath);
-        const buffers = await loadBuffers(doc, bin, baseUrl, label);
-
-        const ctx: LoadContext = {
-            doc,
-            buffers,
-            baseUrl,
-            textureUrls: new Map(),
-            imageUrls: new Map(),
-            occlusionUrls: new Map(),
-        };
-
-        const materials = await Promise.all((doc.materials ?? []).map((m) => convertMaterial(m, ctx)));
-        const meshes = doc.meshes.map((m, i) => buildMesh(ctx, m, materials, `gltf-mesh-${i}`));
-        const instances = buildInstances(doc, meshes);
-
-        return instances;
-    }
-
-    /**
-     * 编码：Instance → 线上形态（`WireInstance`）。
-     *
-     * 真正的序列化由 postMessage（结构化克隆）完成；编码做的是划定线上形态 ——
-     * 显式挑出会过去的字段，deliberately 丢掉类身份和 `Mesh` 的演化缓存
-     * （`evolved` 是 Worker 侧的运行时缓存，不该从主线程带过来）。typed array
-     * 按引用交给克隆，不在这里拷贝。
-     */
-    public static encode(instance: Instance): WireInstance {
-        const mesh = instance.mesh;
-        return {
-            transform: instance.transform,
-            mesh: {
-                name: mesh.name,
-                vertexData: mesh.vertexData,
-                triangleData: mesh.triangleData,
-                // 展开成裸对象：字段一个不少（构造参数全在），原型不带过去
-                materials: mesh.materials.map((m) => ({ ...m })),
-            },
-        };
-    }
-
-    /**
-     * 解码：线上形态 → Instance。
-     *
-     * 收到的是克隆来的纯对象，先按形状校验，再用 IR 的构造函数复活：
-     * `Mesh` 构造会重算包围盒，`PBRMaterial` 构造会补默认值，`Instance` 构造
-     * 会拷贝变换。校验失败的错要能指认出「哪个字段不对」，而不是
-     * `undefined is not a function`。
-     *
-     * 复活按内容去重：同一份几何跨多条消息到达时（程序化地面一块砖一个
-     * Instance、逐条 loadInstance 推过来），结构化克隆跨消息不保共享引用，
-     * 9 块砖是 9 个不同对象 —— 而 BLAS 缓存 / 材质表 / 贴图层都按对象身份
-     * 去重。字节一样就只复活一份，身份恢复了那三层去重才工作。
-     */
-    public static decode(raw: unknown): Instance {
-        if (!raw || typeof raw !== 'object') {
-            throw new Error('实例数据不是对象');
-        }
-        const wire = raw as WireInstance;
-        if (!wire.mesh || typeof wire.mesh !== 'object') {
-            throw new Error('实例数据缺少 mesh');
-        }
-        if (wire.transform !== undefined && !(wire.transform instanceof Float32Array)) {
-            throw new Error('实例数据的 transform 不是 Float32Array');
-        }
-        const { vertexData, triangleData, materials } = wire.mesh;
-        if (!(vertexData instanceof Float32Array) || !(triangleData instanceof Uint32Array)) {
-            throw new Error('实例 mesh 的顶点 / 三角形数据缺失或类型不对');
-        }
-        if (!Array.isArray(materials)) {
-            throw new Error('实例 mesh 缺少材质表');
-        }
-        const key = meshFingerprint(wire.mesh);
-        let mesh = decodedMeshes.get(key);
-        if (!mesh) {
-            mesh = new Mesh(
-                vertexData,
-                triangleData,
-                materials.map((m) => new PBRMaterial(m)),
-                wire.mesh.name,
-            );
-            decodedMeshes.set(key, mesh);
-        }
-        return new Instance(mesh, wire.transform);
-    }
-
-    public transform: Float32Array;
-    public readonly mesh: Mesh;
-
-    constructor(mesh: Mesh, transform?: Float32Array) {
-        this.mesh = mesh;
-        this.transform = transform ? new Float32Array(transform) : new Float32Array(IDENTITY_MAT4);
-    }
-
-    /**
-     * 演化：让 mesh 把材质上的位移贴图消耗掉，返回可以直接进渲染的 instance。
-     *
-     * 没有位移的 mesh 原样返回（`===` 自己），变换照抄；演化结果缓存在 mesh 上，
-     * 所以同一个 mesh 摆很多次也只算一遍、共用一棵 BLAS。
-     */
-    public evolve(): Instance {
-        const mesh = this.mesh.evolve();
-        return mesh === this.mesh ? this : new Instance(mesh, this.transform);
-    }
-
-    public getBounds(): { min: Vec3; max: Vec3 } {
-        const b = this.mesh.bounds;
-        const t = this.transform;
-        const corners = [
-            { x: b.min.x, y: b.min.y, z: b.min.z },
-            { x: b.max.x, y: b.min.y, z: b.min.z },
-            { x: b.min.x, y: b.max.y, z: b.min.z },
-            { x: b.max.x, y: b.max.y, z: b.min.z },
-            { x: b.min.x, y: b.min.y, z: b.max.z },
-            { x: b.max.x, y: b.min.y, z: b.max.z },
-            { x: b.min.x, y: b.max.y, z: b.max.z },
-            { x: b.max.x, y: b.max.y, z: b.max.z },
-        ];
-        let minX = Infinity,
-            minY = Infinity,
-            minZ = Infinity;
-        let maxX = -Infinity,
-            maxY = -Infinity,
-            maxZ = -Infinity;
-        for (const c of corners) {
-            const x = t[0] * c.x + t[4] * c.y + t[8] * c.z + t[12];
-            const y = t[1] * c.x + t[5] * c.y + t[9] * c.z + t[13];
-            const z = t[2] * c.x + t[6] * c.y + t[10] * c.z + t[14];
-            if (x < minX) minX = x;
-            if (x > maxX) maxX = x;
-            if (y < minY) minY = y;
-            if (y > maxY) maxY = y;
-            if (z < minZ) minZ = z;
-            if (z > maxZ) maxZ = z;
-        }
-        return { min: { x: minX, y: minY, z: minZ }, max: { x: maxX, y: maxY, z: maxZ } };
-    }
 }
 
 /**
@@ -1117,7 +1185,7 @@ function buildInstances(doc: GltfDocument, meshes: Mesh[]): Instance[] {
 
         if (node.mesh !== undefined) {
             const mesh = meshes[node.mesh];
-            if (mesh) out.push(new Instance(mesh, world));
+            if (mesh) out.push(new InstanceImpl(mesh, world));
         }
         for (const child of node.children ?? []) walk(child, world);
     };
@@ -1340,27 +1408,7 @@ async function convertMaterial(gm: GltfMaterial, ctx: LoadContext): Promise<PBRM
 
 // 摆位
 
-interface Placement {
-    position: Vec3;
-    /**
-     * 绕 X 轴，弧度。先于 `rotationY` 应用。
-     *
-     * glTF 里站着的模型要躺下，只能绕水平轴放倒 —— 只绕 Y 转永远躺不平。
-     * 先绕 X 放倒、再绕 Y 摆方向，和手里拿个东西摆位置时的手感一致。
-     */
-    rotationX?: number;
-    /** 绕 Y 轴，弧度。0 表示模型朝向不变。 */
-    rotationY?: number;
-    scale?: number;
-}
-
-/**
- * 按作者指定的位置/朝向/缩放摆放一组实例，组内相对关系保持不变。
- *
- * 贴图和模型都按米导出，所以 scale 一般给 1 —— 只有在模型尺寸明显不对时
- * 才调它，而不是拿它凑构图。
- */
-export function placeInstances(instances: readonly Instance[], p: Placement): void {
+placeInstances = (instances, p) => {
     const s = p.scale ?? 1;
     const cy = Math.cos(p.rotationY ?? 0);
     const sy = Math.sin(p.rotationY ?? 0);
@@ -1390,4 +1438,7 @@ export function placeInstances(instances: readonly Instance[], p: Placement): vo
     for (const inst of instances) {
         inst.transform = m.multiply(Mat4.from(inst.transform)).raw();
     }
-}
+};
+
+/** 契约层绑定的赋值。 */
+Instance = InstanceImpl;
