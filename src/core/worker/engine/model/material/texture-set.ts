@@ -1,6 +1,6 @@
 import type { Image } from '../../../../ir/image';
 import type { TextureKind } from '../../../../ir/material';
-import { linearToSRGB } from '../../../../../math/color';
+import { linearToSRGB } from '../../../../math/color';
 
 /**
  * 材质贴图 —— 四个 texture_2d_array（颜色 / 法线 / 粗糙度 / AO），各自带完整 mip 链。
@@ -85,7 +85,8 @@ export class TextureSet {
         // 尺寸先校验：ensureChannel 会分配整块数组，尺寸不对时不该先占显存
         if (image.width !== this.size || image.height !== this.size) {
             throw new Error(
-                `TextureSet: ${kind} texture is ${image.width}×${image.height}, ` + `expected ${this.size}×${this.size}`,
+                `TextureSet: ${kind} texture is ${image.width}×${image.height}, ` +
+                    `expected ${this.size}×${this.size}`,
             );
         }
         const channel = this.ensureChannel(kind);

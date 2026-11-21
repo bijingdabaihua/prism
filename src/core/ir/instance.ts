@@ -1,7 +1,7 @@
-import type { Vec3 } from '../../math/types';
+import type { Vec3 } from '../math/types';
 import type { Image } from './image';
 import type { PBRMaterialOptions, TextureKind } from './material';
-import { Mat4 } from '../../math/mat4';
+import { Mat4 } from '../math/mat4';
 import { PBRMaterial } from './material';
 import { Mesh } from './mesh';
 import { loadTexture } from './image';
@@ -1296,11 +1296,7 @@ function channelUrl(
  * URL 那一层只是为了命中解码缓存（内嵌图要先转 blob URL）：loadTexture 按
  * kind + URL 去重，同一张图被多个材质引用时拿到的是同一个 Image 对象。
  */
-async function textureImage(
-    ctx: LoadContext,
-    index: number,
-    kind: TextureKind,
-): Promise<Image | undefined> {
+async function textureImage(ctx: LoadContext, index: number, kind: TextureKind): Promise<Image | undefined> {
     const url = await textureUrl(ctx, index);
     return url ? await loadTexture(url, kind) : undefined;
 }
@@ -1332,11 +1328,7 @@ async function convertMaterial(gm: GltfMaterial, ctx: LoadContext): Promise<PBRM
     if (pbr.metallicRoughnessTexture) {
         // 整张 RGBA 原样保留：G 是粗糙度、B 是金属度，shader 各取所需。
         // 早先这里只抽出 G 通道、丢掉 B —— 金属度就永远停在标量上。
-        options.metallicRoughnessTexture = await textureImage(
-            ctx,
-            pbr.metallicRoughnessTexture.index,
-            'roughness',
-        );
+        options.metallicRoughnessTexture = await textureImage(ctx, pbr.metallicRoughnessTexture.index, 'roughness');
     }
     if (gm.occlusionTexture) {
         const url = await occlusionUrl(ctx, gm.occlusionTexture.index);
@@ -1377,10 +1369,22 @@ export function placeInstances(instances: readonly Instance[], p: Placement): vo
     // Ry · Rx，列主序
     const m = Mat4.from(
         new Float32Array([
-            cy * s, 0, -sy * s, 0,
-            sy * sx * s, cx * s, cy * sx * s, 0,
-            sy * cx * s, -sx * s, cy * cx * s, 0,
-            p.position.x, p.position.y, p.position.z, 1,
+            cy * s,
+            0,
+            -sy * s,
+            0,
+            sy * sx * s,
+            cx * s,
+            cy * sx * s,
+            0,
+            sy * cx * s,
+            -sx * s,
+            cy * cx * s,
+            0,
+            p.position.x,
+            p.position.y,
+            p.position.z,
+            1,
         ]),
     );
     for (const inst of instances) {

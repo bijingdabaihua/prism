@@ -2,7 +2,7 @@ import type { Instance } from '../../../ir/instance';
 import type { Mesh } from '../../../ir/mesh';
 import type { TextureSet } from './material/texture-set';
 import { INST_FLOATS } from '../../../ir/instance';
-import { Mat4 } from '../../../../math/mat4';
+import { Mat4 } from '../../../math/mat4';
 import { buildBvh, meshBlas } from './bvh';
 import { MaterialStore } from './material/material-store';
 
@@ -181,12 +181,7 @@ function buildSceneNodes(insts: readonly Instance[], offsets: SceneOffsets): Sce
  * 只做搬运：拿上面算好的数组建 buffer、写进去，不再算任何布局。
  */
 
-function createBuffer(
-    device: GPUDevice,
-    data: Float32Array | Uint32Array,
-    label: string,
-    emptySize = 4,
-): GPUBuffer {
+function createBuffer(device: GPUDevice, data: Float32Array | Uint32Array, label: string, emptySize = 4): GPUBuffer {
     const buf = device.createBuffer({
         size: data.byteLength || emptySize,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -231,12 +226,7 @@ function invertTransform(transform: Float32Array): Float32Array {
     return Mat4.from(transform).invert().raw();
 }
 
-function uploadInstances(
-    device: GPUDevice,
-    insts: Instance[],
-    offsets: SceneOffsets,
-    blasBase: number,
-): GPUBuffer {
+function uploadInstances(device: GPUDevice, insts: Instance[], offsets: SceneOffsets, blasBase: number): GPUBuffer {
     const data = new Float32Array(insts.length * INST_FLOATS);
     for (let i = 0; i < insts.length; i++) {
         const b = i * INST_FLOATS;

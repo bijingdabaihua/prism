@@ -1,7 +1,7 @@
-import type { AABB, Vec3 } from '../../math/types';
+import type { AABB, Vec3 } from '../math/types';
 import type { PBRMaterial } from './material';
 import type { Image } from './image';
-import { sub, dot, cross, normalize } from '../../math/vec3';
+import { sub, dot, cross, normalize } from '../math/vec3';
 
 /**
  * 材质上的位移拆成两份：图 + 两个刻度（零点、每格几米）。格距不用给 —— 它由图自己定。
@@ -124,13 +124,7 @@ function sampleHeight(image: Image, u: number, v: number): number {
  * u/v 是米制 UV，按图自己的一格几米（`image.meters`）折成图上的重复。只看 UV：
  * 同一个三角形上，位置不同、UV 相同的地方抬得一样高。
  */
-function sampleDisplacement(
-    image: Image,
-    u: number,
-    v: number,
-    mid: number,
-    scale: number,
-): number {
+function sampleDisplacement(image: Image, u: number, v: number, mid: number, scale: number): number {
     const meters = image.meters ?? 1;
     return (sampleHeight(image, u / meters, v / meters) - mid) * scale;
 }
@@ -157,12 +151,7 @@ export class Mesh {
     public readonly bounds: AABB;
     private evolved?: Mesh;
 
-    constructor(
-        vertexData: Float32Array,
-        triangleData: Uint32Array,
-        materials: readonly PBRMaterial[],
-        name?: string,
-    ) {
+    constructor(vertexData: Float32Array, triangleData: Uint32Array, materials: readonly PBRMaterial[], name?: string) {
         this.vertexData = vertexData;
         this.triangleData = triangleData;
         this.materials = materials;
@@ -405,11 +394,7 @@ export class MeshBuilder {
      * `uv` 给了就改用给定的投影取坐标。默认的「沿边」在折起来的面上会换轴：
      * 地面折成土坡那一刻，贴图方向跟着折 90°，图案在缝上错位。
      */
-    public addQuad(
-        corners: [Vec3, Vec3, Vec3, Vec3],
-        material: number,
-        uv?: UvProjection,
-    ): void {
+    public addQuad(corners: [Vec3, Vec3, Vec3, Vec3], material: number, uv?: UvProjection): void {
         const [a, b, c, d] = corners;
         const e1 = sub(b, a);
         const e2 = sub(c, a);

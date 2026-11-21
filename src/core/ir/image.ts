@@ -1,4 +1,4 @@
-import { srgbToLinear } from '../../math/color';
+import { srgbToLinear } from '../math/color';
 import type { TextureKind } from './material';
 
 /**
