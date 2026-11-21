@@ -1,33 +1,46 @@
 /**
  * 光追 Worker —— 一个 Prism 实例一个，独占一个 GPUDevice。
  *
- * 整个渲染管线（Engine / Camera / Model / Frame）都跑在这个线程里，画布是
+ * 整个渲染管线（Camera / Model / Background）都跑在这个线程里，画布是
  * Worker 自己建的 OffscreenCanvas，主线程从头到尾不碰 GPU。画面通过
  * `camera.listen()` 以 ImageBitmap 推回主线程 —— 每间隔最多一帧。
  *
- * 运行态全部挂在 `WorkerHost` 一个实例上。消息语义沉到 Engine —— 机位命令和
- * 画面监听直接委托 `engine.camera`，环境图委托 `engine.background`，几何委托
- * `engine.addInstances`；顶层只留引擎本身、串行队列和回执。
+ * 这个文件同时是线程入口和组装根：运行态全部挂在 `WorkerHost` 一个实例上，
+ * init 时建设备、把模型 / 环境图 / 相机三个模块装配起来。消息语义直接沉到
+ * 模块 —— 机位命令和画面监听委托 camera，环境图委托 background，几何委托
+ * model.add；顶层只留串行队列和回执。
+ *
+ * 渲染目标、帧循环都归相机 —— 主线程那边也只有 camera 一个句柄管尺寸和出图，
+ * 内外同一套分工。这里只负责把三者拼起来并持有生命周期。
  *
  * Worker 不认识任何具体场景：几何要么来自 glTF 字节（worker 里解码），要么
  * 是主线程构造好 IR 推过来的裸数据（`Instance.decode` 复活）。
+ *
+ * 销毁不走消息：Prism.dispose 直接 terminate Worker，线程没了设备自然释放，
+ * 所以没有对称的 teardown 路径。
  */
 // 纯类型导入：消息协议和门面同文件，编译后这条边会完全擦除。
 import type { CameraCommand, WorkerRequest, WorkerResponse } from '../api/prism';
-import { WebGPUUnavailableError } from './context';
-import { Engine } from './engine';
-import { loadImage } from './image';
+import { createDevice, WebGPUUnavailableError } from './camera/context';
+import { Camera } from './camera/camera';
+import { Background } from './background/background';
+import { Model } from './model/model';
+import { loadImage } from './model/image';
 import { Instance } from './model/instance';
 
 /**
- * Worker 的运行态：一个引擎 + 一条串行队列。
+ * Worker 的运行态：三个模块 + 一条串行队列。
  *
- * 消息里凡是「引擎自己会」的（机位、监听、环境图、几何）都委托下去；
+ * 消息里凡是「模块自己会」的（机位、监听、环境图、几何）都委托下去；
  * 顶层只负责把异步操作排好队、把结果回执出去。
  */
 class WorkerHost {
-    /** 渲染引擎：init 时建，Prism 生命周期内唯一一个。 */
-    private engine: Engine | null = null;
+    /** 渲染相机：init 时建，持有渲染目标和帧循环。Prism 生命周期内唯一一个。 */
+    private camera: Camera | null = null;
+    /** 环境光照：init 时和相机一起装配。 */
+    private background: Background | null = null;
+    /** 场景几何：BVH / 材质表，所有加几何的落点。 */
+    private model: Model | null = null;
     /** 异步任务的串行链。 */
     private taskChain: Promise<void> = Promise.resolve();
 
@@ -36,7 +49,7 @@ class WorkerHost {
         switch (request.type) {
             case 'init':
                 try {
-                    this.engine ??= await Engine.create();
+                    await this.initEngine();
                     this.reply(request.id, undefined);
                 } catch (err) {
                     const message = err instanceof Error ? err.message : String(err);
@@ -48,10 +61,10 @@ class WorkerHost {
                 this.applyCamera(request.command);
                 return;
             case 'listen/start':
-                this.engine?.camera.startListening(Math.max(1, request.intervalMs), postFrame);
+                this.camera?.startListening(Math.max(1, request.intervalMs), postFrame);
                 return;
             case 'listen/stop':
-                this.engine?.camera.stopListening();
+                this.camera?.stopListening();
                 return;
             case 'background/setImage':
                 this.enqueue(() => this.setImage(request.id, request.blob));
@@ -69,10 +82,26 @@ class WorkerHost {
     }
 
     /**
+     * 建设备 + 装配三个模块；已经建过就直接返回。
+     *
+     * 一个 Prism 实例只有一套引擎，只能由 init 装配。场景的机位、环境图、
+     * 几何随后分别送进来。相机最后建：构造时要拿 model 和 background 的引用。
+     */
+    private async initEngine(): Promise<void> {
+        if (this.camera) return;
+        const device = await createDevice();
+        const background = new Background(device);
+        const model = new Model(device);
+        this.background = background;
+        this.model = model;
+        this.camera = new Camera(device, new OffscreenCanvas(1, 1), model, background);
+    }
+
+    /**
      * 异步任务的串行化。
      *
-     * `loadImage` / `scene.load()` 都是异步的：连着调两次，先发的那次可能后回来，
-     * 把后发的那张顶掉。排队之后「最后发起的那次」一定最后落地。
+     * `loadImage` / `Instance.buildByGltf` 都是异步的：连着调两次，先发的那次
+     * 可能后回来，把后发的那张顶掉。排队之后「最后发起的那次」一定最后落地。
      */
     private enqueue(task: () => Promise<void>): void {
         this.taskChain = this.taskChain.then(task);
@@ -86,12 +115,12 @@ class WorkerHost {
      *
      * 引擎已经在跑时也可以换：Background.version() 变化会让 PathTracePass 在
      * 下一帧重建 bind group 并清零累积。解码留在顶层（loadImage 是 ir 的
-     * 入口），解码后的 Image 才交给引擎。
+     * 入口），解码后的 Image 才交给 background。
      */
     private async setImage(id: number, blob: Blob): Promise<void> {
         try {
-            if (!this.engine) throw new Error('Prism 还没初始化');
-            this.engine.background.setImage(await loadImage(blob));
+            if (!this.background) throw new Error('Prism 还没初始化');
+            this.background.setImage(await loadImage(blob));
             this.reply(id, undefined);
         } catch (err) {
             this.failure(id, err instanceof Error ? err.message : String(err));
@@ -106,8 +135,8 @@ class WorkerHost {
      */
     private async setRotation(id: number, rotation: number): Promise<void> {
         try {
-            if (!this.engine) throw new Error('Prism 还没初始化');
-            this.engine.background.setRotation(rotation);
+            if (!this.background) throw new Error('Prism 还没初始化');
+            this.background.setRotation(rotation);
             this.reply(id, undefined);
         } catch (err) {
             this.failure(id, err instanceof Error ? err.message : String(err));
@@ -117,13 +146,13 @@ class WorkerHost {
     /**
      * 加载一个 glTF 文件里的全部 Instance，追加到当前场景。
      *
-     * 与场景配方入口一样，最终都落到 `engine.addInstances`。模型入口都是
-     * 追加语义，外部可以一个一个调用，把多个来源拼进同一个场景。
+     * 与场景配方入口一样，最终都落到 `model.add`。模型入口都是追加语义，
+     * 外部可以一个一个调用，把多个来源拼进同一个场景。
      */
     private async loadGltf(id: number, source: Blob): Promise<void> {
         try {
-            if (!this.engine) throw new Error('Prism 还没初始化');
-            this.engine.addInstances(await Instance.buildByGltf(source));
+            if (!this.model) throw new Error('Prism 还没初始化');
+            this.model.add(await Instance.buildByGltf(source));
             this.reply(id, undefined);
         } catch (err) {
             this.failure(id, err instanceof Error ? err.message : String(err));
@@ -135,13 +164,13 @@ class WorkerHost {
      *
      * 主线程用 `Instance.encode` 把 IR 编成裸数据发过来（类实例过不了线程
      * 边界），这里 `Instance.decode` 校验并复活成 IR 类实例，再走同一条
-     * `engine.addInstances`。典型来源是程序化几何：地面这类东西在 app 侧
-     * 造好，不从 glTF 走。
+     * `model.add`。典型来源是程序化几何：地面这类东西在 app 侧造好，
+     * 不从 glTF 走。
      */
     private async loadInstance(id: number, wire: unknown): Promise<void> {
         try {
-            if (!this.engine) throw new Error('Prism 还没初始化');
-            this.engine.addInstances([Instance.decode(wire)]);
+            if (!this.model) throw new Error('Prism 还没初始化');
+            this.model.add([Instance.decode(wire)]);
             this.reply(id, undefined);
         } catch (err) {
             this.failure(id, err instanceof Error ? err.message : String(err));
@@ -157,10 +186,10 @@ class WorkerHost {
      */
     private applyCamera(command: CameraCommand): void {
         if (command.type === 'resize') {
-            this.engine?.camera.setSize(command.size.width, command.size.height);
+            this.camera?.setSize(command.size.width, command.size.height);
             return;
         }
-        const camera = this.engine?.camera;
+        const camera = this.camera;
         if (!camera) return;
 
         switch (command.type) {

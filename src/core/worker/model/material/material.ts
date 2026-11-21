@@ -1,8 +1,8 @@
 import type { Color } from '../../../math/types';
-import type { Image } from '../../image';
-import type { ZipArchive } from '../../zip';
-import { loadImage, loadTexture } from '../../image';
-import { contentCacheId, isAbsoluteUri, parseZip, readZipEntry, resolveZipPath, zipEntryUrl } from '../../zip';
+import type { Image } from '../image';
+import type { ZipArchive } from '../zip';
+import { loadImage, loadTexture } from '../image';
+import { contentCacheId, isAbsoluteUri, parseZip, readZipEntry, resolveZipPath, zipEntryUrl } from '../zip';
 
 /**
  * 渲染器内部统一的材质表达。

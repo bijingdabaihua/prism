@@ -1,4 +1,4 @@
-import type { Image } from '../../image';
+import type { Image } from '../image';
 import type { TextureKind } from './material';
 import { linearToSRGB } from '../../../math/color';
 

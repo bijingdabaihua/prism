@@ -1,6 +1,6 @@
 import type { AABB, Vec3 } from '../../math/types';
 import type { PBRMaterial } from './material/material';
-import type { Image } from '../image';
+import type { Image } from './image';
 import { sub, dot, cross, normalize } from '../../math/vec3';
 
 /**

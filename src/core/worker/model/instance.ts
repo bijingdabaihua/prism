@@ -1,10 +1,10 @@
 import type { Vec3 } from '../../math/types';
-import type { Image } from '../image';
+import type { Image } from './image';
 import type { PBRMaterialOptions, TextureKind } from './material/material';
 import { Mat4 } from '../../math/mat4';
 import { PBRMaterial } from './material/material';
 import { Mesh } from './mesh';
-import { loadTexture } from '../image';
+import { loadTexture } from './image';
 
 /**
  * Instance IR：一个 mesh 的一次摆放，以及它的线上编解码和 glTF 导入器。

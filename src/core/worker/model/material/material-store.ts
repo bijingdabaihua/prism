@@ -1,4 +1,4 @@
-import type { Image } from '../../image';
+import type { Image } from '../image';
 import type { PBRMaterial, TextureKind } from './material';
 import type { MaterialTexSlots, TexRef } from './packing';
 import { TextureSet } from './texture-set';

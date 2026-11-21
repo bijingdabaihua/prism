@@ -1,4 +1,4 @@
-import type { CameraView } from '../worker/camera';
+import type { CameraView } from '../worker/camera/camera';
 
 /**
  * 主线程相机句柄：契约 + 实现。
@@ -14,7 +14,7 @@ import type { CameraView } from '../worker/camera';
  * 以下类型和接口是对外 API。修改前先确认调用方影响。
  */
 
-export type { CameraView } from '../worker/camera';
+export type { CameraView } from '../worker/camera/camera';
 
 /** 渲染视口尺寸（物理像素 = CSS 尺寸 × devicePixelRatio）。 */
 export interface ViewportSize {

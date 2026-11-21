@@ -1,7 +1,7 @@
 import type { RenderContext } from '../../context';
-import type { Model } from '../../model/model';
-import type { Background } from '../../background';
-import type { TextureSet } from '../../model/material/texture-set';
+import type { Model } from '../../../model/model';
+import type { Background } from '../../../background/background';
+import type { TextureSet } from '../../../model/material/texture-set';
 import { buildPixelOrder } from './pixel-order';
 import structs from './structs.wgsl?raw';
 import aabb from './aabb.wgsl?raw';

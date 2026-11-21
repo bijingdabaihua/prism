@@ -1,5 +1,5 @@
-import { srgbToLinear } from '../math/color';
-import type { TextureKind } from './model/material/material';
+import { srgbToLinear } from '../../math/color';
+import type { TextureKind } from './material/material';
 
 /**
  * 场景 IR 里的图像，以及图像 / 贴图的导入器。

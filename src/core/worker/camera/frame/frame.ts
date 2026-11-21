@@ -1,6 +1,6 @@
 import type { Camera } from '../camera';
-import type { Model } from '../model/model';
-import type { Background } from '../background';
+import type { Model } from '../../model/model';
+import type { Background } from '../../background/background';
 import type { RenderContext } from '../context';
 import { GpuTimer } from './gpu-timer';
 import { PathTracePass } from './path-tracing/path-trace-pass';
