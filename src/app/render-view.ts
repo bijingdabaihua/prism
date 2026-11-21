@@ -1,4 +1,4 @@
-import { Prism, PrismUnsupportedError } from '../core/prism';
+import { Prism, PrismUnsupportedError } from '../core/api/prism';
 import { SCENE_CARDS } from './scenes/catalog';
 import { fetchBlob, loadGeometry } from './scenes/assemble';
 

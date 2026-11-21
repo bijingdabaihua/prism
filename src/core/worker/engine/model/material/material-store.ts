@@ -1,5 +1,5 @@
-import type { Image } from '../../../ir/image';
-import type { PBRMaterial, TextureKind } from '../../../ir/material';
+import type { Image } from '../../../../ir/image';
+import type { PBRMaterial, TextureKind } from '../../../../ir/material';
 import type { MaterialTexSlots, TexRef } from './packing';
 import { TextureSet } from './texture-set';
 import { packPBRMaterial, PBR_MAT_FLOATS } from './packing';

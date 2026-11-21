@@ -1,4 +1,4 @@
-import type { CameraSpec, InstancePlacement } from '../../core/prism';
+import type { CameraSpec, InstancePlacement } from '../../core/api/prism';
 
 /**
  * 场景元数据：画廊卡片 + 外面装场景要用的机位 / 环境图 / 几何清单。

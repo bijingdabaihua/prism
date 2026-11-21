@@ -5,8 +5,8 @@
  * `createModel(rpc)`，实现类不导出。
  */
 
-import { Instance } from './ir/instance';
-import type { WireInstance } from './ir/instance';
+import { Instance } from '../ir/instance';
+import type { WireInstance } from '../ir/instance';
 
 /**
  * 公开契约

@@ -116,7 +116,7 @@ class PrismImpl implements Prism {
             throw new PrismUnsupportedError('WebGPU is not available. Try Chrome 113+.');
         }
 
-        const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
+        const worker = new Worker(new URL('../worker/worker.ts', import.meta.url), { type: 'module' });
         const rpc = new RpcClient(worker);
         try {
             await withTimeout(

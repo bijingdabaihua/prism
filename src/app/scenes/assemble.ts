@@ -1,4 +1,4 @@
-import type { ModelHandle } from '../../core/prism';
+import type { ModelHandle } from '../../core/api/prism';
 import { Instance, placeInstances } from '../../core/ir/instance';
 import { buildTiledGround, loadGroundMaterial } from './ground';
 import type { SceneGeometry } from './catalog';
