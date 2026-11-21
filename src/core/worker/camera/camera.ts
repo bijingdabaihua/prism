@@ -1,5 +1,4 @@
 import type { Vec3 } from '../../math/types';
-import type { RenderSurface } from './context';
 import type { Model } from '../model/model';
 import type { Background } from '../background/background';
 import { RenderContext } from './context';
@@ -72,7 +71,7 @@ export interface CameraView {
  * 此处只有声明，赋值在实现层。
  */
 export let Camera: {
-    new (device: GPUDevice, canvas: RenderSurface, model: Model, background: Background): Camera;
+    new (device: GPUDevice, canvas: OffscreenCanvas, model: Model, background: Background): Camera;
 };
 
 /**
@@ -168,7 +167,7 @@ class CameraImpl implements Camera {
     /** 帧循环：什么时候再渲染一帧、每帧多少预算，也由相机管。 */
     private readonly loop: RenderLoop;
 
-    constructor(device: GPUDevice, canvas: RenderSurface, model: Model, background: Background) {
+    constructor(device: GPUDevice, canvas: OffscreenCanvas, model: Model, background: Background) {
         this.device = device;
         this.context = new RenderContext(device, canvas);
         this.buffer = this.device.createBuffer({

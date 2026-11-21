@@ -82,10 +82,8 @@ class FrameImpl implements Frame {
 
     public capture(): ImageBitmap | null {
         if (this.submittedFrames === 0) return null;
-        const canvas = this.context.canvas();
-        if (typeof OffscreenCanvas === 'undefined' || !(canvas instanceof OffscreenCanvas)) return null;
         try {
-            return canvas.transferToImageBitmap();
+            return this.context.canvas().transferToImageBitmap();
         } catch {
             // 画布还没呈现过任何一帧
             return null;
@@ -105,7 +103,6 @@ class FrameImpl implements Frame {
     }
 
     public renderFrame(): boolean {
-        this.context.applyResizeIfNeeded();
         if (this.context.width() === 0 || this.context.height() === 0) return false;
 
         const cameraChanged = this.camera.upload();

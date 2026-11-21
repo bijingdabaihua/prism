@@ -1,22 +1,14 @@
 /**
- * 渲染表面：主线程的 canvas，或交给 Worker 的 OffscreenCanvas。
- *
- * 两者在 WebGPU 眼里是同一种东西，区别只在尺寸怎么来 —— 主线程可以读
- * clientWidth，Worker 读不到，只能由主线程通过 camera.resize 送进来。
- */
-export type RenderSurface = HTMLCanvasElement | OffscreenCanvas;
-
-/**
- * GPU 基础设施：申请设备（createDevice）并把 GPUDevice 和 canvas 绑定为一个整体。
+ * GPU 基础设施：申请设备（createDevice）并把 GPUDevice 和 OffscreenCanvas 绑定为一个整体。
  * RenderContext 是渲染目标尺寸的单一持有者。
  *
- * Canvas 的宽高是共享基础设施，不属于任何单个 pass；尺寸变化通过 onResize 订阅通知
- * 各组件（Camera / PathTracePass 等），各自响应。驱动方式为每帧在渲染循环里调用
- * applyResizeIfNeeded()，符合业界 "deferred resize" 实践（ResizeObserver 或逐帧检测
- * 只记录尺寸，应用放到 render loop 中 getCurrentTexture 之前）。
+ * 画布宿主只有 OffscreenCanvas 一种 —— 整条渲染管线只活在 Worker 中。离屏画布读不到
+ * CSS 布局（没有 clientWidth / devicePixelRatio），尺寸只能由主线程通过 camera.resize
+ * 送进来。
  *
- * OffscreenCanvas 没有 clientWidth/devicePixelRatio，逐帧探测没有意义：
- * 尺寸由 setSize() 从外部（Worker 收到的 resize 命令）直接给。
+ * Canvas 的宽高是共享基础设施，不属于任何单个 pass；尺寸变化通过 onResize 订阅通知
+ * 各组件（Camera / PathTracePass 等），各自响应。尺寸的唯一来源是 setSize() ——
+ * Worker 收到的 resize 命令 —— 应用即通知，没有逐帧探测。
  *
  * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 CODE_STYLE.md。
  */
@@ -29,7 +21,7 @@ export type RenderSurface = HTMLCanvasElement | OffscreenCanvas;
  * 此处只有声明，赋值在实现层。
  */
 export let RenderContext: {
-    new (device: GPUDevice, canvas: RenderSurface): RenderContext;
+    new (device: GPUDevice, canvas: OffscreenCanvas): RenderContext;
 };
 
 /**
@@ -44,17 +36,12 @@ export interface RenderContext {
     readonly format: GPUTextureFormat;
 
     gpuContext(): GPUCanvasContext | null;
-    canvas(): RenderSurface;
-    /** 尺寸来源是外部（OffscreenCanvas）：直接应用并通知订阅者。 */
+    canvas(): OffscreenCanvas;
+    /** 尺寸来源是外部（resize 命令）：直接应用并通知订阅者。 */
     setSize(width: number, height: number): void;
     width(): number;
     height(): number;
-    /**
-     * 每帧调用：把 canvas 当前 CSS 尺寸 × devicePixelRatio 应用到 backing store。
-     * 尺寸变化时通知所有订阅者，返回是否发生变化。DPR 动态读取，支持换屏。
-     */
-    applyResizeIfNeeded(): boolean;
-    /** 注册尺寸变化回调。回调在 applyResizeIfNeeded() 内同步触发。 */
+    /** 注册尺寸变化回调。回调在 setSize() 内同步触发。 */
     onResize(fn: (width: number, height: number) => void): void;
 }
 
@@ -87,14 +74,11 @@ class RenderContextImpl implements RenderContext {
     private _width = 0;
     private _height = 0;
     private resizeListeners: Array<(width: number, height: number) => void> = [];
-    private readonly canvasEl: RenderSurface;
-    private readonly offscreen: boolean;
+    private readonly canvasEl: OffscreenCanvas;
 
-    constructor(device: GPUDevice, canvas: RenderSurface) {
+    constructor(device: GPUDevice, canvas: OffscreenCanvas) {
         this.device = device;
         this.canvasEl = canvas;
-        // Worker 里没有 HTMLCanvasElement 这个全局，instanceof 前要先看它存不存在
-        this.offscreen = typeof HTMLCanvasElement === 'undefined' || !(canvas instanceof HTMLCanvasElement);
         const ctx = canvas.getContext('webgpu');
         if (!ctx) throw new Error('Failed to get WebGPU context');
         this.ctx = ctx;
@@ -105,7 +89,7 @@ class RenderContextImpl implements RenderContext {
         return this.ctx;
     }
 
-    public canvas(): RenderSurface {
+    public canvas(): OffscreenCanvas {
         return this.canvasEl;
     }
 
@@ -125,22 +109,6 @@ class RenderContextImpl implements RenderContext {
 
     public height(): number {
         return this._height;
-    }
-
-    public applyResizeIfNeeded(): boolean {
-        // 离屏画布的主尺寸由 setSize() 管，这里不猜
-        if (this.offscreen) return false;
-        const canvas = this.canvasEl as HTMLCanvasElement;
-        const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-        const w = Math.round(canvas.clientWidth * dpr);
-        const h = Math.round(canvas.clientHeight * dpr);
-        if (w === this._width && h === this._height) return false;
-        this._width = w;
-        this._height = h;
-        canvas.width = w;
-        canvas.height = h;
-        for (const fn of this.resizeListeners) fn(w, h);
-        return true;
     }
 
     public onResize(fn: (width: number, height: number) => void): void {
