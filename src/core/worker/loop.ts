@@ -1,4 +1,46 @@
 /**
+ * 帧循环。
+ *
+ * 只负责「什么时候再渲染一帧」和「每帧的 GPU 预算」，不知道场景、相机、材质的存在。
+ *
+ * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 CODE_STYLE.md。
+ */
+
+// ══════════════════════════ 契约层（导出） ══════════════════════════
+
+/**
+ * RenderLoop 的类绑定：构造即启动 —— 先空跑几帧量刷新率，然后进入 rAF 循环。
+ *
+ * 此处只有声明，赋值在实现层。
+ */
+export let RenderLoop: {
+    new (frame: FrameSource): RenderLoop;
+};
+
+/**
+ * 帧循环。
+ *
+ * 只负责「什么时候再渲染一帧」和「每帧的 GPU 预算」，不知道场景、相机、材质的存在。
+ */
+export interface RenderLoop {
+    stop(): void;
+}
+
+/**
+ * 帧循环眼里的「一帧来源」。
+ *
+ * 相机把渲染器藏在内部，只交出这份调度接口 —— 循环不知道 Frame / 相机的存在。
+ */
+export interface FrameSource {
+    readyForNextFrame(): boolean;
+    restarted(): boolean;
+    renderFrame(): boolean;
+    setTargetFrameMs(ms: number): void;
+}
+
+// ══════════════════════════ 实现层（不导出） ══════════════════════════
+
+/**
  * 目标预算占实测刷新间隔的比例 —— 两档。
  *
  * 画面正在被改动（拖动相机、重置累积）时用 0.75：给合成器留余量，帧率优先，
@@ -32,24 +74,7 @@ const KEEPALIVE_POLL_MS = 250;
 /** 顶上 rAF 之后的尝试间隔：让 GPU 连轴转。 */
 const KEEPALIVE_RETRY_MS = 16;
 
-/**
- * 帧循环眼里的「一帧来源」。
- *
- * 相机把渲染器藏在内部，只交出这份调度接口 —— 循环不知道 Frame / 相机的存在。
- */
-interface FrameSource {
-    readyForNextFrame(): boolean;
-    restarted(): boolean;
-    renderFrame(): boolean;
-    setTargetFrameMs(ms: number): void;
-}
-
-/**
- * 帧循环。
- *
- * 只负责「什么时候再渲染一帧」和「每帧的 GPU 预算」，不知道场景、相机、材质的存在。
- */
-export class RenderLoop {
+class RenderLoopImpl implements RenderLoop {
     private running = false;
     private animFrameId: number | null = null;
     /** boot/stop 代际号：防止 stop 之后旧的 rAF 链继续跑。 */
@@ -187,3 +212,6 @@ export class RenderLoop {
         this.animFrameId = requestAnimationFrame(() => this.tick(generation));
     }
 }
+
+/** 契约层类绑定的赋值。 */
+RenderLoop = RenderLoopImpl;

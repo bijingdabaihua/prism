@@ -16,6 +16,24 @@ import type { Image } from './image';
  * 过滤性是要单独申请的设备特性。半浮点的范围（65504）对 HDRI 绰绰有余，太阳
  * 也就几千。
  *
+ * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 CODE_STYLE.md。
+ */
+
+// ══════════════════════════ 契约层（导出） ══════════════════════════
+
+/**
+ * Background 的类绑定：构造时只持有 device —— 没有「没有环境图」的占位状态，
+ * setImage 之前就是还没有。
+ *
+ * 此处只有声明，赋值在实现层。
+ */
+export let Background: {
+    new (device: GPUDevice): Background;
+};
+
+/**
+ * 环境光照的 GPU 侧：一张带 mip 链的 envMap 纹理 + 一份亮度 CDF。
+ *
  * setImage() 只负责换源：每调一次换一张环境图（门面的 background.setImage
  * 就是这么用的），并回到原图方向。纹理和 CDF 在这一次里直接建好 ——
  * 没有「待上传」状态。
@@ -29,10 +47,41 @@ import type { Image } from './image';
  * 换图之后 `version` 会变：PathTracePass 每帧对比它，变了就重建 bind group、
  * 清零累积 —— 旧纹理已经被 destroy，不能再被任何在途的 bind group 引用。
  */
-export class Background {
+export interface Background {
+    /**
+     * 设置环境图 —— 只换源，并回到原图方向。
+     *
+     * 原图会留在内存里给 setRotation 用 —— 环境图只有一张，这份解码后的
+     * 浮点数据换来运行时改朝向，不用重新解码文件。
+     */
+    setImage(image: Image): void;
+    /**
+     * 旋转当前环境图：原图不动，按新角度重新建纹理和亮度 CDF。
+     *
+     * 需要先 setImage；改完 version 会变，累积清零。角度是绕 +y 的弧度，
+     * 与场景数据里的 `envRotation` 同一套定义。
+     */
+    setRotation(rotation: number): void;
+    /**
+     * 是否已经有一张环境图可用。
+     *
+     * 场景在引擎创建之后才异步加载，那之前的帧没有任何光照 —— bind group
+     * 建不起来，PathTracePass 用这个判断要不要跳过这一帧。
+     */
+    hasEnvironment(): boolean;
+    /** 当前环境图的版本号 —— 变了就说明纹理 / CDF 已经换掉。 */
+    version(): number;
+    envMapView(): GPUTextureView;
+    envDistributionBuffer(): GPUBuffer;
+    destroy(): void;
+}
+
+// ══════════════════════════ 实现层（不导出） ══════════════════════════
+
+class BackgroundImpl implements Background {
     private envMapTex: GPUTexture | null = null;
     private envMapTexView: GPUTextureView | null = null;
-    /** 亮度 CDF（打包布局见文件末尾的 buildEnvDistribution），供环境 NEE 使用。 */
+    /** 亮度 CDF（打包布局见 buildEnvDistribution），供环境 NEE 使用。 */
     private envDistBuf: GPUBuffer | null = null;
     /** 未旋转的原图，供 setRotation 重编译；setImage 之前为 null。 */
     private source: Image | null = null;
@@ -46,12 +95,6 @@ export class Background {
         this.device = device;
     }
 
-    /**
-     * 设置环境图 —— 只换源，并回到原图方向。
-     *
-     * 原图会留在内存里给 setRotation 用 —— 环境图只有一张，这份解码后的
-     * 浮点数据换来运行时改朝向，不用重新解码文件。
-     */
     public setImage(image: Image): void {
         if (image.layout !== 'equirect') {
             throw new Error(`Unsupported environment layout: ${image.layout}`);
@@ -59,12 +102,6 @@ export class Background {
         this.upload(image, 0);
     }
 
-    /**
-     * 旋转当前环境图：原图不动，按新角度重新建纹理和亮度 CDF。
-     *
-     * 需要先 setImage；改完 version 会变，累积清零。角度是绕 +y 的弧度，
-     * 与场景数据里的 `envRotation` 同一套定义。
-     */
     public setRotation(rotation: number): void {
         if (!this.source) {
             throw new Error('Background: 还没有环境图，先 setImage');
@@ -73,17 +110,10 @@ export class Background {
         this.upload(this.source, rotation);
     }
 
-    /**
-     * 是否已经有一张环境图可用。
-     *
-     * 场景在引擎创建之后才异步加载，那之前的帧没有任何光照 —— bind group
-     * 建不起来，PathTracePass 用这个判断要不要跳过这一帧。
-     */
     public hasEnvironment(): boolean {
         return this.envMapTexView !== null;
     }
 
-    /** 当前环境图的版本号 —— 变了就说明纹理 / CDF 已经换掉。 */
     public version(): number {
         return this.versionCounter;
     }
@@ -198,6 +228,9 @@ export class Background {
         }
     }
 }
+
+/** 契约层类绑定的赋值。 */
+Background = BackgroundImpl;
 
 /**
  * 把环境图绕 +y 轴转 angle 弧度：等距柱状图沿经度整体平移。

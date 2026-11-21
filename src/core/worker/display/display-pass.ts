@@ -7,8 +7,34 @@ import FS from './fullscreen-fragment.wgsl?raw';
  *
  * 输入是 fp32 累加器，不可过滤 —— 用 textureLoad 逐像素取值，不采样；
  * 显示尺寸和渲染尺寸一比一，本来也不需要插值。
+ *
+ * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 CODE_STYLE.md。
  */
-export class DisplayPass {
+
+// ══════════════════════════ 契约层（导出） ══════════════════════════
+
+/**
+ * DisplayPass 的类绑定：构造即编译 blit 管线。
+ *
+ * 此处只有声明，赋值在实现层。
+ */
+export let DisplayPass: {
+    new (context: RenderContext): DisplayPass;
+};
+
+/** 显示 pass：把累加纹理 blit 到 canvas —— ACES、暗角、颗粒。 */
+export interface DisplayPass {
+    /**
+     * @param view   要显示的纹理（累加结果）
+     * @param version 上游重建纹理时递增；变化则丢弃所有缓存的 bind group
+     */
+    record(encoder: GPUCommandEncoder, view: GPUTextureView | null, version: number): void;
+    destroy(): void;
+}
+
+// ══════════════════════════ 实现层（不导出） ══════════════════════════
+
+class DisplayPassImpl implements DisplayPass {
     private readonly context: RenderContext;
     private pipeline: GPURenderPipeline | null = null;
     private blitVersion = -1;
@@ -40,16 +66,17 @@ export class DisplayPass {
         });
     }
 
-    /**
-     * @param view   要显示的纹理（累加结果）
-     * @param version 上游重建纹理时递增；变化则丢弃所有缓存的 bind group
-     */
     public record(encoder: GPUCommandEncoder, view: GPUTextureView | null, version: number): void {
         const ctx = this.context.gpuContext();
         if (!ctx) return;
         const bindGroup = this.bindGroupFor(view, version);
         if (!bindGroup) return;
         this.draw(encoder, bindGroup, ctx.getCurrentTexture().createView());
+    }
+
+    public destroy(): void {
+        this.pipeline = null;
+        this.blitBindGroups.clear();
     }
 
     private bindGroupFor(view: GPUTextureView | null, version: number): GPUBindGroup | null {
@@ -80,11 +107,6 @@ export class DisplayPass {
         rp.end();
     }
 
-    public destroy(): void {
-        this.pipeline = null;
-        this.blitBindGroups.clear();
-    }
-
     private createBlitBindGroup(radianceView: GPUTextureView): GPUBindGroup {
         return this.context.device.createBindGroup({
             layout: this.bgl,
@@ -92,3 +114,6 @@ export class DisplayPass {
         });
     }
 }
+
+/** 契约层类绑定的赋值。 */
+DisplayPass = DisplayPassImpl;

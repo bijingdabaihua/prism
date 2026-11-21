@@ -9,14 +9,14 @@ import { MaterialStore } from './material/material-store';
 /**
  * Model —— 场景的 GPU 形态：一组 buffer。
  *
- * 和 `ir/instance.ts` 的 `Instance` 是同一样东西的两面：Instance 是 CPU 侧的
+ * 和 `instance.ts` 的 `Instance` 是同一样东西的两面：Instance 是 CPU 侧的
  * 描述，这里是它编译出来的 GPU 数据。render 层只认识这一面，不碰任何 CPU
  * 侧的几何对象。
  *
  * 这里的 model 指「场景在 GPU 这边的模型」，不是 `assets/model/` 下那个
  * glTF 资产 —— 后者是 Mesh / Instance 的事。
  *
- * 每次 `add()` 都把「当前全部实例」重走一遍编译链，四个阶段都在这个文件里：
+ * 每次 `add()` 都把「当前全部实例」重走一遍编译链，四个阶段都在实现层：
  *
  *   布局    mesh 去重，算出每个 mesh 的 BLAS / 顶点 / 三角形起始下标
  *   节点表  TLAS + 各 mesh 的 BLAS 拼成一张扁平 Float32Array，下标重基
@@ -31,7 +31,64 @@ import { MaterialStore } from './material/material-store';
  * SceneNodesData）没有第二个消费者，拆成三个模块只是让读者来回跳。
  *
  * 材质表由其内部按本次打包的结果维护，材质采样的图集归材质表持有（见 MaterialStore）。
+ *
+ * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 CODE_STYLE.md。
  */
+
+// ══════════════════════════ 契约层（导出） ══════════════════════════
+
+/**
+ * Model 的类绑定：构造即建空的材质表，四个场景 buffer 要等首次 add() 才存在。
+ *
+ * 此处只有声明，赋值在实现层。
+ */
+export let Model: {
+    new (device: GPUDevice): Model;
+};
+
+/** 场景的 GPU 形态 —— 一组 buffer，可追加；释放见 destroy()。 */
+export interface Model {
+    /**
+     * TLAS + BLAS 合并节点 buffer：每节点 8 floats。
+     * 布局 [TLAS ...][BLAS ...]；TLAS 叶子编码 -(instanceID + 1)，
+     * BLAS 叶子编码 -(绝对三角形下标 + 1)。
+     */
+    nodes: GPUBuffer;
+    /** 合并后的顶点数据，12 floats/vertex */
+    geometry: GPUBuffer;
+    /** 合并后的三角形，4 × u32（v0,v1,v2, 绝对材质槽位） */
+    triangles: GPUBuffer;
+    /** 实例表：36 floats/instance（blas_node_offset + transform + inv_transform） */
+    instanceBuffer: GPUBuffer;
+
+    /** 几何 / 材质是否已经编译上 GPU。PathTracePass 靠它决定能不能建 bind group。 */
+    ready(): boolean;
+    /**
+     * 场景资源版本：每次成功追加加一。
+     *
+     * 追加会换掉 nodes / geometry / triangles / instanceBuffer / 材质 SSBO，
+     * 已建的 bind group 随之过期，累积也要清零重来。
+     */
+    version(): number;
+    /**
+     * 向场景追加一组实例 —— 外部可以一个一个调用。
+     *
+     * 新实例先演化（位移贴图烘成真几何），再和已追加的实例合并，整体重走
+     * 一遍编译链。`add()` 之前这四个 buffer 都不存在 —— PathTracePass 等
+     * `ready()` 才建 bind group。
+     *
+     * 先建新 buffer、再提交材质表、最后才换字段：中途失败时旧场景保持可用；
+     * 换下来的旧 buffer 等已提交的 GPU 工作完成后再 destroy。
+     */
+    add(insts: Instance[]): void;
+    /** 材质 SSBO，供 bind group 直接绑定。 */
+    materialBuffer(): GPUBuffer;
+    /** 材质图集，供 bind group 直接绑定。 */
+    textures(): TextureSet;
+    destroy(): void;
+}
+
+// ══════════════════════════ 实现层（不导出） ══════════════════════════
 
 // 布局
 
@@ -264,19 +321,10 @@ function uploadSceneNodes(device: GPUDevice, data: Float32Array): GPUBuffer {
     return createBuffer(device, data, 'scene-nodes');
 }
 
-/** 场景的 GPU 形态 —— 可追加；释放见 destroy()。 */
-export class Model {
-    /**
-     * TLAS + BLAS 合并节点 buffer：每节点 8 floats。
-     * 布局 [TLAS ...][BLAS ...]；TLAS 叶子编码 -(instanceID + 1)，
-     * BLAS 叶子编码 -(绝对三角形下标 + 1)。
-     */
+class ModelImpl implements Model {
     public nodes!: GPUBuffer;
-    /** 合并后的顶点数据，12 floats/vertex */
     public geometry!: GPUBuffer;
-    /** 合并后的三角形，4 × u32（v0,v1,v2, 绝对材质槽位） */
     public triangles!: GPUBuffer;
-    /** 实例表：36 floats/instance（blas_node_offset + transform + inv_transform） */
     public instanceBuffer!: GPUBuffer;
     private compiled = false;
     /** 每次成功追加加一；PathTracePass 靠它发现场景 buffer 换过。 */
@@ -294,31 +342,14 @@ export class Model {
         this.materialStore = new MaterialStore(device);
     }
 
-    /** 几何 / 材质是否已经编译上 GPU。PathTracePass 靠它决定能不能建 bind group。 */
     public ready(): boolean {
         return this.compiled;
     }
 
-    /**
-     * 场景资源版本：每次成功追加加一。
-     *
-     * 追加会换掉 nodes / geometry / triangles / instanceBuffer / 材质 SSBO，
-     * 已建的 bind group 随之过期，累积也要清零重来。
-     */
     public version(): number {
         return this.versionCounter;
     }
 
-    /**
-     * 向场景追加一组实例 —— 外部可以一个一个调用。
-     *
-     * 新实例先演化（位移贴图烘成真几何），再和已追加的实例合并，整体重走
-     * 一遍编译链。`add()` 之前这四个 buffer 都不存在 —— PathTracePass 等
-     * `ready()` 才建 bind group。
-     *
-     * 先建新 buffer、再提交材质表、最后才换字段：中途失败时旧场景保持可用；
-     * 换下来的旧 buffer 等已提交的 GPU 工作完成后再 destroy。
-     */
     public add(insts: Instance[]): void {
         if (this.destroyed) throw new Error('Model: 已经 destroy');
         if (insts.length === 0) return;
@@ -354,12 +385,10 @@ export class Model {
         this.retire(retired);
     }
 
-    /** 材质 SSBO，供 bind group 直接绑定。 */
     public materialBuffer(): GPUBuffer {
         return this.materialStore.buffer();
     }
 
-    /** 材质图集，供 bind group 直接绑定。 */
     public textures(): TextureSet {
         return this.materialStore.textures;
     }
@@ -416,6 +445,9 @@ export class Model {
         }
     }
 }
+
+/** 契约层类绑定的赋值。 */
+Model = ModelImpl;
 
 interface CompiledBuffers {
     nodes: GPUBuffer;

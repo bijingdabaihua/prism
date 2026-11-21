@@ -18,9 +18,10 @@ import { Mat4 } from '../math/mat4';
  * 和 Background 一样是「一份状态 + 它的 GPU 镜像」：相机自己知道参数变化了
  * 没有，脏了就写 buffer，调用方只看返回值决定要不要重置累积。
  *
- * 初始值只是占位：外部装场景时会用 `camera.set` 覆盖掉。
- * 分辨率是渲染目标的事，但相机跟着它变，所以这里订阅 canvas 尺寸变化。
+ * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 CODE_STYLE.md。
  */
+
+// ══════════════════════════ 契约层（导出） ══════════════════════════
 
 /**
  * 场景机位：场景作者指定的取景描述。
@@ -62,7 +63,82 @@ export interface CameraView {
     focusDistance?: number;
 }
 
-export class Camera {
+/**
+ * Camera 的类绑定：构造即开工 —— 建渲染目标、uniform、Frame 和帧循环。
+ *
+ * 初始值只是占位：外部装场景时会用 `applyView` 覆盖掉。
+ * 分辨率是渲染目标的事，但相机跟着它变，所以构造时订阅 canvas 尺寸变化。
+ *
+ * 此处只有声明，赋值在实现层。
+ */
+export let Camera: {
+    new (device: GPUDevice, canvas: RenderSurface, model: Model, background: Background): Camera;
+};
+
+/**
+ * 轨道相机：观察状态 + 它的 uniform buffer（112 B）+ 出图。
+ *
+ * 渲染目标（RenderContext）和帧循环（RenderLoop）都归相机 —— Engine 只是
+ * 组装根。和 Background 一样是「一份状态 + 它的 GPU 镜像」：相机自己知道
+ * 参数变化了没有，脏了就写 buffer，调用方只看 upload() 的返回值决定要不要
+ * 重置累积。
+ */
+export interface Camera {
+    /** 112 B 机位 uniform（布局见 structs.wgsl）。 */
+    readonly buffer: GPUBuffer;
+
+    /** 参数变化（脏）时写入 uniform buffer；返回是否有变化。 */
+    upload(): boolean;
+    /**
+     * 按间隔把当前画面推出去 —— 画面是相机的输出，所以推送也挂在相机上。
+     *
+     * 和主线程的 `CameraHandle.listen` 同一个语义：渲染比间隔慢时不重复推
+     * 同一帧。同一时刻只保留一个监听者，重复调用会替换旧的。
+     */
+    startListening(intervalMs: number, onFrame: (frame: ImageBitmap) => void): void;
+    stopListening(): void;
+    /** 提交一帧（渲染循环驱动）。 */
+    renderFrame(): boolean;
+    /** 这一帧还能不能提交 —— 渲染循环的节流判断。 */
+    readyForNextFrame(): boolean;
+    /** 上一帧是否重开了累积 —— 渲染循环据此切换采样预算档位。 */
+    restarted(): boolean;
+    /** 每帧 GPU 预算（毫秒）。 */
+    setTargetFrameMs(ms: number): void;
+    eye(): Vec3;
+    vpMatrix(): Mat4;
+    invViewProj(): Mat4;
+    /**
+     * 装载场景机位。近远平面跟着距离走，外部只报距离。
+     *
+     * 没有「按包围盒自动取景」这条退路：自动取景在画廊里永远是错的构图 ——
+     * 相机会退到刚好看全整个场景的地方，而画廊要的是场景作者选的那一格。
+     */
+    setView(target: Vec3, distance: number, theta: number, phi: number): void;
+    /** 整套机位一次装进来：场景机位、运镜关键帧都走这一条。 */
+    applyView(view: CameraView): void;
+    /** 回到最近一次整套装进来的机位 —— 观察者运镜之后的复位。 */
+    reset(): void;
+    setFovY(radians: number): void;
+    /**
+     * 镜头：光圈半径 + 对焦距离，两个都是米。任一个为 0 就退回针孔。
+     *
+     * 单位是米而不是 f 值，因为引擎不知道传感器多大 —— 焦距只活在 fovY 里。
+     * 场景作者要把「50 mm 开 f/2.8」换成年半径，那是取景的问题，不是渲染的问题。
+     */
+    setLens(apertureRadius: number, focusDistance: number): void;
+    /** 视口尺寸（物理像素）—— 主线程量好送进来，画布、相机和各 pass 一起变。 */
+    setSize(width: number, height: number): void;
+    orbitTheta(delta: number): void;
+    orbitPhi(delta: number): void;
+    zoom(factor: number): void;
+    pan(deltaX: number, deltaY: number): void;
+    destroy(): void;
+}
+
+// ══════════════════════════ 实现层（不导出） ══════════════════════════
+
+class CameraImpl implements Camera {
     public readonly buffer: GPUBuffer;
     /** 正在往哪里推画面；null = 没人监听。 */
     private listener: Listener | null = null;
@@ -105,7 +181,6 @@ export class Camera {
         this.loop = new RenderLoop(this);
     }
 
-    /** 参数变化（脏）时写入 uniform buffer；返回是否有变化。 */
     public upload(): boolean {
         if (!this.dirty) return false;
         this.dirty = false;
@@ -133,12 +208,6 @@ export class Camera {
         return true;
     }
 
-    /**
-     * 按间隔把当前画面推出去 —— 画面是相机的输出，所以推送也挂在相机上。
-     *
-     * 和主线程的 `CameraHandle.listen` 同一个语义：渲染比间隔慢时不重复推
-     * 同一帧。同一时刻只保留一个监听者，重复调用会替换旧的。
-     */
     public startListening(intervalMs: number, onFrame: (frame: ImageBitmap) => void): void {
         this.stopListening();
         const listener: Listener = { intervalMs: Math.max(1, intervalMs), onFrame, lastSent: -1 };
@@ -154,22 +223,18 @@ export class Camera {
         }
     }
 
-    /** 提交一帧（渲染循环驱动）。 */
     public renderFrame(): boolean {
         return this.frame.renderFrame();
     }
 
-    /** 这一帧还能不能提交 —— 渲染循环的节流判断。 */
     public readyForNextFrame(): boolean {
         return this.frame.readyForNextFrame();
     }
 
-    /** 上一帧是否重开了累积 —— 渲染循环据此切换采样预算档位。 */
     public restarted(): boolean {
         return this.frame.restarted();
     }
 
-    /** 每帧 GPU 预算（毫秒）。 */
     public setTargetFrameMs(ms: number): void {
         this.frame.setTargetFrameMs(ms);
     }
@@ -187,12 +252,6 @@ export class Camera {
         return this.vpMatrix().invert();
     }
 
-    /**
-     * 装载场景机位。近远平面跟着距离走，外部只报距离。
-     *
-     * 没有「按包围盒自动取景」这条退路：自动取景在画廊里永远是错的构图 ——
-     * 相机会退到刚好看全整个场景的地方，而画廊要的是场景作者选的那一格。
-     */
     public setView(target: Vec3, distance: number, theta: number, phi: number): void {
         this.target = target;
         this.orbitDist = Math.max(distance, 0.01);
@@ -203,7 +262,6 @@ export class Camera {
         this.dirty = true;
     }
 
-    /** 整套机位一次装进来：场景机位、运镜关键帧都走这一条。 */
     public applyView(view: CameraView): void {
         this.sceneView = view;
         this.setFovY(view.fovY);
@@ -211,7 +269,6 @@ export class Camera {
         this.setLens(view.apertureRadius ?? 0, view.focusDistance ?? 0);
     }
 
-    /** 回到最近一次整套装进来的机位 —— 观察者运镜之后的复位。 */
     public reset(): void {
         this.applyView(this.sceneView ?? DEFAULT_VIEW);
     }
@@ -221,19 +278,12 @@ export class Camera {
         this.dirty = true;
     }
 
-    /**
-     * 镜头：光圈半径 + 对焦距离，两个都是米。任一个为 0 就退回针孔。
-     *
-     * 单位是米而不是 f 值，因为引擎不知道传感器多大 —— 焦距只活在 fovY 里。
-     * 场景作者要把「50 mm 开 f/2.8」换成年半径，那是取景的问题，不是渲染的问题。
-     */
     public setLens(apertureRadius: number, focusDistance: number): void {
         this.apertureRadius = Math.max(0, apertureRadius);
         this.focusDistance = Math.max(0, focusDistance);
         this.dirty = true;
     }
 
-    /** 视口尺寸（物理像素）—— 主线程量好送进来，画布、相机和各 pass 一起变。 */
     public setSize(width: number, height: number): void {
         this.context.setSize(width, height);
     }
@@ -242,10 +292,12 @@ export class Camera {
         this.theta += delta;
         this.dirty = true;
     }
+
     public orbitPhi(delta: number): void {
         this.phi = Math.max(0.01, Math.min(Math.PI - 0.01, this.phi + delta));
         this.dirty = true;
     }
+
     public zoom(factor: number): void {
         this.orbitDist = Math.max(0.1, this.orbitDist * factor);
         this.dirty = true;
@@ -322,3 +374,6 @@ interface Listener {
     /** 上一次推出去的是第几帧。 */
     lastSent: number;
 }
+
+/** 契约层类绑定的赋值。 */
+Camera = CameraImpl;

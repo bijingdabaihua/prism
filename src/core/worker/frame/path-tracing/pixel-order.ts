@@ -7,8 +7,18 @@
  *
  * 随机源是 xorshift32 驱动的 Fisher–Yates：不需要密码学质量，只要分布均匀、
  * 相邻采样在空间上不聚集。
+ *
+ * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 CODE_STYLE.md。
  */
-export function buildPixelOrder(count: number): Uint32Array {
+
+// ══════════════════════════ 契约层（导出） ══════════════════════════
+
+/** 生成像素采样顺序：[0, count) 的一个确定随机排列（xorshift32 + Fisher–Yates）。 */
+export let buildPixelOrder: (count: number) => Uint32Array;
+
+// ══════════════════════════ 实现层（不导出） ══════════════════════════
+
+buildPixelOrder = (count) => {
     const order = new Uint32Array(count);
     for (let i = 0; i < count; i++) order[i] = i;
 
@@ -25,4 +35,4 @@ export function buildPixelOrder(count: number): Uint32Array {
         order[j] = t;
     }
     return order;
-}
+};

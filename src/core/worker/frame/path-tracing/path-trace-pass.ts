@@ -10,6 +10,71 @@ import bvh from './bvh.wgsl?raw';
 import shade from './shade.wgsl?raw';
 import main from './main.wgsl?raw';
 
+/**
+ * 路径追踪 compute pass。
+ *
+ * 每帧只采样屏幕的一部分像素：顺序表是 0..W*H-1 的随机排列，游标从表头开始
+ * 每帧取连续的一段，一轮正好覆盖每个像素一次。dispatch 是 1D 的 —— 一个线程
+ * 对应表里的一个像素，采样量由 GPU 实测耗时自适应（见 reportFrameTime）。
+ *
+ * 累加平均的分母不需要逐像素存储：顺序表每跨过 W*H 个采样，所有像素恰好
+ * 各多采一次，所以「该像素之前采过几次」= 已完成轮数 (+ 本帧是否跨轮)。
+ *
+ * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 CODE_STYLE.md。
+ */
+
+// ══════════════════════════ 契约层（导出） ══════════════════════════
+
+/**
+ * PathTracePass 的类绑定：构造即建环境图采样器和设备级资源（pipeline / bgl /
+ * uniform），尺寸相关资源等首帧 resize 再懒建。
+ *
+ * 此处只有声明，赋值在实现层。
+ */
+export let PathTracePass: {
+    new (context: RenderContext, model: Model, cameraUniform: GPUBuffer, background: Background): PathTracePass;
+};
+
+/** 路径追踪 compute pass：每帧采样屏幕的一部分像素，累加进 ping-pong 纹理。 */
+export interface PathTracePass {
+    /** 当前要显示的累积视图；还没有就返回 null。 */
+    radianceView(): GPUTextureView | null;
+    /** 累积纹理每重建一次就加一；DisplayPass 靠它判断 blit bind group 是否过期。 */
+    radianceVersion(): number;
+    /** 上一帧是否重开了累积（相机 / 场景 / 尺寸变化）。 */
+    restarted(): boolean;
+    /** 本帧实际调度的像素数（预算控制器读取）。 */
+    lastDispatch(): number;
+    /** 每帧 GPU 预算（毫秒）。RenderLoop 按实测刷新率下发。 */
+    setTargetFrameMs(ms: number): void;
+    /**
+     * GPU 实测耗时回调（异步，通常比提交晚 1–2 帧）。
+     *
+     * @param samplingMs 本帧「拷贝 + compute」的 GPU 时间
+     * @param measuredDispatch 测量那一帧实际调度的像素数
+     *
+     * 用**比例**而不是成本模型：这一帧花了多少毫秒，就按「目标 ÷ 实测」去乘采样量。
+     *
+     * 之前按「预算 ÷ 每像素成本」直接算出目标值，等于假设耗时与采样量成正比。
+     * 但每帧还有一项与采样量无关的固定开销 —— 全屏拷贝累积纹理（部分采样时
+     * 未被抽中的像素要从读纹理搬过去）和显示 blit。它在采样量小的时候摊到每个
+     * 像素上，把成本估高，估高又让采样量更小、摊得更多 —— 正反馈，一路滑到
+     * MIN_DISPATCH 就锁死。比例控制天然带上这一项：它收敛到「实测 ≈ 预算」，
+     * 固定开销自动被让出来，不需要知道它有多大。
+     *
+     * 单帧最多挪动 2 倍；一次坏测量只造成两倍的偏差，下一帧就被实测纠正回来。
+     */
+    reportFrameTime(samplingMs: number, measuredDispatch: number): void;
+    /**
+     * 往 encoder 里录这一帧：按需重建累积纹理 / bind group，重置或拷贝累加器，
+     * 写 uniform，dispatch 采样线程。cameraChanged 时清空累积从头采。
+     */
+    record(encoder: GPUCommandEncoder, cameraChanged: boolean): void;
+    destroy(): void;
+}
+
+// ══════════════════════════ 实现层（不导出） ══════════════════════════
+
 /** 每帧至少采样的像素数（再慢也不低于这个，保证拖动时画面不是全黑）。 */
 const MIN_DISPATCH = 4096;
 /** 1D dispatch 的 workgroup 大小。 */
@@ -21,17 +86,9 @@ const DEFAULT_TARGET_MS = 12.5;
 /** 显示 blit + 提交间隙的固定预留（毫秒），从每帧预算里先扣掉。 */
 const FIXED_RESERVE_MS = 0.5;
 
-/**
- * 路径追踪 compute pass。
- *
- * 每帧只采样屏幕的一部分像素：顺序表是 0..W*H-1 的随机排列，游标从表头开始
- * 每帧取连续的一段，一轮正好覆盖每个像素一次。dispatch 是 1D 的 —— 一个线程
- * 对应表里的一个像素，采样量由 GPU 实测耗时自适应（见 reportFrameTime）。
- *
- * 累加平均的分母不需要逐像素存储：顺序表每跨过 W*H 个采样，所有像素恰好
- * 各多采一次，所以「该像素之前采过几次」= 已完成轮数 (+ 本帧是否跨轮)。
- */
-export class PathTracePass {
+const SHADER = [structs, aabb, intersect, bvh, shade, main].join('\n');
+
+class PathTracePassImpl implements PathTracePass {
     /** 累积纹理每重建一次就加一；DisplayPass 靠它判断 blit bind group 是否过期。 */
     private version = 0;
     /**
@@ -123,38 +180,18 @@ export class PathTracePass {
         return this.version;
     }
 
-    /** 上一帧是否重开了累积（相机 / 场景 / 尺寸变化）。 */
     public restarted(): boolean {
         return this.restartedThisFrame;
     }
 
-    /** 本帧实际调度的像素数（预算控制器读取）。 */
     public lastDispatch(): number {
         return this.lastDispatched;
     }
 
-    /** 每帧 GPU 预算（毫秒）。RenderLoop 按实测刷新率下发。 */
     public setTargetFrameMs(ms: number): void {
         if (ms > 0) this.targetFrameMs = ms;
     }
 
-    /**
-     * GPU 实测耗时回调（异步，通常比提交晚 1–2 帧）。
-     *
-     * @param samplingMs 本帧「拷贝 + compute」的 GPU 时间
-     * @param measuredDispatch 测量那一帧实际调度的像素数
-     *
-     * 用**比例**而不是成本模型：这一帧花了多少毫秒，就按「目标 ÷ 实测」去乘采样量。
-     *
-     * 之前按「预算 ÷ 每像素成本」直接算出目标值，等于假设耗时与采样量成正比。
-     * 但每帧还有一项与采样量无关的固定开销 —— 全屏拷贝累积纹理（部分采样时
-     * 未被抽中的像素要从读纹理搬过去）和显示 blit。它在采样量小的时候摊到每个
-     * 像素上，把成本估高，估高又让采样量更小、摊得更多 —— 正反馈，一路滑到
-     * MIN_DISPATCH 就锁死。比例控制天然带上这一项：它收敛到「实测 ≈ 预算」，
-     * 固定开销自动被让出来，不需要知道它有多大。
-     *
-     * 单帧最多挪动 2 倍；一次坏测量只造成两倍的偏差，下一帧就被实测纠正回来。
-     */
     public reportFrameTime(samplingMs: number, measuredDispatch: number): void {
         if (!(samplingMs > 0.02) || measuredDispatch <= 0 || this.pixelCount <= 0) return;
 
@@ -451,4 +488,5 @@ export class PathTracePass {
     }
 }
 
-const SHADER = [structs, aabb, intersect, bvh, shade, main].join('\n');
+/** 契约层类绑定的赋值。 */
+PathTracePass = PathTracePassImpl;

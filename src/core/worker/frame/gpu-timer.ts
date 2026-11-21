@@ -8,7 +8,50 @@
  *
  * 设备不支持 timestamp-query 时退回 queue.onSubmittedWorkDone()：
  * 从提交到 GPU 执行完的墙钟时间，含少量驱动开销，但足够让控制器收敛。
+ *
+ * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 CODE_STYLE.md。
  */
+
+// ══════════════════════════ 契约层（导出） ══════════════════════════
+
+/**
+ * GpuTimer 的类绑定：构造时探测设备能力，能写时间戳就走 timestamp-query
+ * 链路，否则退回 onSubmittedWorkDone。
+ *
+ * 此处只有声明，赋值在实现层。
+ */
+export let GpuTimer: {
+    new (device: GPUDevice): GpuTimer;
+};
+
+/** 一帧 GPU 耗时的测量器（timestamp-query 优先，onSubmittedWorkDone 退回）。 */
+export interface GpuTimer {
+    /** 每次测量完成时回调（异步，通常比提交晚 1–2 帧）。 */
+    onMeasure?: (samplingMs: number, totalMs: number, dispatch: number) => void;
+
+    /**
+     * 还能不能再提交一帧。
+     *
+     * 提交得比 GPU 跑得快，队列就越积越深：槽位全被占满之后测量被丢弃，
+     * 控制器收不到任何新数据、采样量冻住不动，直到队列排空才缓过来。
+     *
+     * 上限是 2 而不是 1：只许一帧在途的话，提交要等上一帧的读回、再等下一个
+     * rAF，GPU 每帧空转最多半个刷新间隔 —— 采样量直接掉三成。2 帧在途
+     * 正好让 GPU 连轴转，而 3 个槽位永远留着一个空位，测量不断供。
+     */
+    canSubmit(): boolean;
+    /** 帧开始（采样之前）。 */
+    begin(encoder: GPUCommandEncoder): void;
+    /** 路径追踪（拷贝 + compute）结束。 */
+    afterSampling(encoder: GPUCommandEncoder): void;
+    /** 显示（blit）结束；同时 resolve 时间戳并排进读回队列。 */
+    end(encoder: GPUCommandEncoder, dispatch: number): void;
+    /** submit 之后调用：开始读回（时间戳）或等待 GPU 完成（退回方案）。 */
+    afterSubmit(): void;
+    destroy(): void;
+}
+
+// ══════════════════════════ 实现层（不导出） ══════════════════════════
 
 /**
  * 规范里 GPUCommandEncoder.writeTimestamp() 已经是正式 API，但 @webgpu/types
@@ -40,8 +83,7 @@ const MAX_IN_FLIGHT = 2;
 /** 读回槽位个数。比 MAX_IN_FLIGHT 多一个，是上面那条的前提。 */
 const SLOT_COUNT = 3;
 
-export class GpuTimer {
-    /** 每次测量完成时回调（异步，通常比提交晚 1–2 帧）。 */
+class GpuTimerImpl implements GpuTimer {
     public onMeasure?: (samplingMs: number, totalMs: number, dispatch: number) => void;
     private querySet: GPUQuerySet | null = null;
     private resolveBuf: GPUBuffer | null = null;
@@ -76,22 +118,11 @@ export class GpuTimer {
         }
     }
 
-    /**
-     * 还能不能再提交一帧。
-     *
-     * 提交得比 GPU 跑得快，队列就越积越深：槽位全被占满之后测量被丢弃，
-     * 控制器收不到任何新数据、采样量冻住不动，直到队列排空才缓过来。
-     *
-     * 上限是 2 而不是 1：只许一帧在途的话，提交要等上一帧的读回、再等下一个
-     * rAF，GPU 每帧空转最多半个刷新间隔 —— 采样量直接掉三成。2 帧在途
-     * 正好让 GPU 连轴转，而 3 个槽位永远留着一个空位，测量不断供。
-     */
     public canSubmit(): boolean {
         if (this.slots.length === 0) return !this.fallbackBusy;
         return this.inFlight < MAX_IN_FLIGHT;
     }
 
-    /** 帧开始（采样之前）。 */
     public begin(encoder: GPUCommandEncoder): void {
         if (this.querySet) {
             writeTimestamp(encoder, this.querySet, 0);
@@ -100,12 +131,10 @@ export class GpuTimer {
         }
     }
 
-    /** 路径追踪（拷贝 + compute）结束。 */
     public afterSampling(encoder: GPUCommandEncoder): void {
         if (this.querySet) writeTimestamp(encoder, this.querySet, 1);
     }
 
-    /** 显示（blit）结束；同时 resolve 时间戳并排进读回队列。 */
     public end(encoder: GPUCommandEncoder, dispatch: number): void {
         if (!this.querySet || !this.resolveBuf) {
             this.fallbackDispatch = dispatch;
@@ -125,7 +154,6 @@ export class GpuTimer {
         this.pending = { slot, dispatch };
     }
 
-    /** submit 之后调用：开始读回（时间戳）或等待 GPU 完成（退回方案）。 */
     public afterSubmit(): void {
         if (!this.querySet) {
             this.fallbackAfterSubmit();
@@ -183,3 +211,6 @@ export class GpuTimer {
             });
     }
 }
+
+/** 契约层类绑定的赋值。 */
+GpuTimer = GpuTimerImpl;

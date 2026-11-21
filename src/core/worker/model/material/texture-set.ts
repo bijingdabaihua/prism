@@ -15,7 +15,39 @@ import { linearToSRGB } from '../../../math/color';
  * 生命周期跟着 MaterialStore（按 key 缓存），换场景时不清空：贴图是资产，不是场景数据。
  * 四个数组按需分配 —— 一张贴图都没注册时不占显存，只留 1×1 占位。
  * 0 号层永远保留给占位数据，真正的贴图从 1 号层开始。
+ *
+ * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 CODE_STYLE.md。
  */
+
+// ══════════════════════════ 契约层（导出） ══════════════════════════
+
+/**
+ * TextureSet 的类绑定：构造即建四个 1×1 占位数组和公共采样器，整块数组首次
+ * 注册时才分配。
+ *
+ * 此处只有声明，赋值在实现层。
+ */
+export let TextureSet: {
+    new (device: GPUDevice, size?: number, layerCount?: number): TextureSet;
+};
+
+/** 材质贴图集：四个 texture_2d_array，按 Image 对象身份去重层号。 */
+export interface TextureSet {
+    /**
+     * 把一张贴图写进对应数组的一层，返回层号。同一张 Image（按对象身份）只占一层。
+     *
+     * 贴图尺寸必须等于数组尺寸：数组内各层共享 mip 链，尺寸不一致没法放进来。
+     */
+    register(kind: TextureKind, image: Image): number;
+    albedoView(): GPUTextureView;
+    normalView(): GPUTextureView;
+    roughnessView(): GPUTextureView;
+    occlusionView(): GPUTextureView;
+    sampler(): GPUSampler;
+    destroy(): void;
+}
+
+// ══════════════════════════ 实现层（不导出） ══════════════════════════
 
 /** 颜色贴图存 sRGB（8 位精度保留在暗部），数据贴图存原始值。 */
 const FORMAT: Record<TextureKind, GPUTextureFormat> = {
@@ -50,7 +82,7 @@ interface Channel {
     keys: Map<Image, number>;
 }
 
-export class TextureSet {
+class TextureSetImpl implements TextureSet {
     private readonly device: GPUDevice;
     private readonly size: number;
     private readonly layerCount: number;
@@ -76,11 +108,6 @@ export class TextureSet {
         });
     }
 
-    /**
-     * 把一张贴图写进对应数组的一层，返回层号。同一张 Image（按对象身份）只占一层。
-     *
-     * 贴图尺寸必须等于数组尺寸：数组内各层共享 mip 链，尺寸不一致没法放进来。
-     */
     public register(kind: TextureKind, image: Image): number {
         // 尺寸先校验：ensureChannel 会分配整块数组，尺寸不对时不该先占显存
         if (image.width !== this.size || image.height !== this.size) {
@@ -217,6 +244,9 @@ export class TextureSet {
         );
     }
 }
+
+/** 契约层类绑定的赋值。 */
+TextureSet = TextureSetImpl;
 
 /** 线性 RGB float → 8 位 RGBA。颜色贴图编码回 sRGB 交给硬件解码。 */
 function encodeRGBA8(linear: Float32Array, pixels: number, srgb: boolean): Uint8Array {

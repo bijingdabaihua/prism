@@ -13,9 +13,11 @@ import type { PBRMaterial } from './material';
  *   8–11  baseColor TexRef    12–15 roughness TexRef
  *   16–19 normal TexRef       20–23 occlusion TexRef
  *   24–27 metallic-roughness TexRef
+ *
+ * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 CODE_STYLE.md。
  */
 
-// 贴图引用
+// ══════════════════════════ 契约层（导出） ══════════════════════════
 
 /**
  * 一张贴图在 texture_2d_array 里的位置。
@@ -39,16 +41,20 @@ export interface MaterialTexSlots {
     metallicRoughness?: TexRef;
 }
 
+/** 材质在 SSBO 里的定长记录尺寸（float 数），布局见文件头。 */
+export const PBR_MAT_FLOATS = 28;
+
+/** PBRMaterial + 贴图槽位 → GPU 定长记录（PBR_MAT_FLOATS floats）。 */
+export let packPBRMaterial: (m: PBRMaterial, tex?: MaterialTexSlots) => Float32Array;
+
+// ══════════════════════════ 实现层（不导出） ══════════════════════════
+
 /** TexRef → 4 floats。没有贴图时 layer=0、scale=1、has=0。 */
 function packTexRef(t: TexRef | undefined): number[] {
     return t ? [t.layer, t.scale, t.has, 0] : [0, 1, 0, 0];
 }
 
-// 材质
-
-export const PBR_MAT_FLOATS = 28;
-
-export function packPBRMaterial(m: PBRMaterial, tex?: MaterialTexSlots): Float32Array {
+packPBRMaterial = (m, tex) => {
     const c = m.baseColor;
     const bc = packTexRef(tex?.baseColor);
     const ro = packTexRef(tex?.roughness);
@@ -85,4 +91,4 @@ export function packPBRMaterial(m: PBRMaterial, tex?: MaterialTexSlots): Float32
         mr[2],
         mr[3],
     ]);
-}
+};

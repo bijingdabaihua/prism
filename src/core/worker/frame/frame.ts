@@ -12,8 +12,52 @@ import { DisplayPass } from '../display/display-pass';
  * 编排顺序是固定的：先路径追踪（写累加纹理），再显示（blit 到 canvas）。
  * 采样预算、游标推进都在 PathTracePass 内部；这里只负责把各段串起来，
  * 以及在两端打 GPU 时间戳。
+ *
+ * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 CODE_STYLE.md。
  */
-export class Frame {
+
+// ══════════════════════════ 契约层（导出） ══════════════════════════
+
+/**
+ * Frame 的类绑定：构造即装配路径追踪 / 显示两个 pass 和 GPU 计时器。
+ *
+ * 此处只有声明，赋值在实现层。
+ */
+export let Frame: {
+    new (context: RenderContext, model: Model, camera: Camera, background: Background): Frame;
+};
+
+/** 一帧的提交单元：把路径追踪和显示两段串起来，两端打 GPU 时间戳。 */
+export interface Frame {
+    /** 已提交的帧数。 */
+    frameCount(): number;
+    /**
+     * 把画布上最近一次呈现的画面搬成位图。
+     *
+     * 只有 OffscreenCanvas（Worker 里）支持；还没提交过任何一帧时返回 null，
+     * 调用方等下一次。
+     */
+    capture(): ImageBitmap | null;
+    /** 每帧 GPU 预算（毫秒），由 RenderLoop 按实测显示器刷新率下发。 */
+    setTargetFrameMs(ms: number): void;
+    /** 上一帧是否重开了累积 —— 渲染循环据此在「响应 / 吞吐」两档预算间切换。 */
+    restarted(): boolean;
+    /**
+     * 这一帧还能不能提交。在途帧到上限就先跳过：队列越积越深会让测量断供，
+     * 采样量冻住不动（见 GpuTimer.canSubmit()）。
+     */
+    readyForNextFrame(): boolean;
+    /**
+     * 提交一帧。先应用 canvas 尺寸变化（deferred resize：在 getCurrentTexture 之前），
+     * 尺寸为 0（canvas 尚未布局）时跳过整帧。返回是否实际提交了渲染。
+     */
+    renderFrame(): boolean;
+    destroy(): void;
+}
+
+// ══════════════════════════ 实现层（不导出） ══════════════════════════
+
+class FrameImpl implements Frame {
     /** 已提交的帧数 —— 相机靠它判断画布上有没有新画面可推。 */
     private submittedFrames = 0;
     private readonly context: RenderContext;
@@ -32,17 +76,10 @@ export class Frame {
             this.pathTracePass.reportFrameTime(samplingMs, dispatch);
     }
 
-    /** 已提交的帧数。 */
     public frameCount(): number {
         return this.submittedFrames;
     }
 
-    /**
-     * 把画布上最近一次呈现的画面搬成位图。
-     *
-     * 只有 OffscreenCanvas（Worker 里）支持；还没提交过任何一帧时返回 null，
-     * 调用方等下一次。
-     */
     public capture(): ImageBitmap | null {
         if (this.submittedFrames === 0) return null;
         const canvas = this.context.canvas();
@@ -55,28 +92,18 @@ export class Frame {
         }
     }
 
-    /** 每帧 GPU 预算（毫秒），由 RenderLoop 按实测显示器刷新率下发。 */
     public setTargetFrameMs(ms: number): void {
         this.pathTracePass.setTargetFrameMs(ms);
     }
 
-    /** 上一帧是否重开了累积 —— 渲染循环据此在「响应 / 吞吐」两档预算间切换。 */
     public restarted(): boolean {
         return this.pathTracePass.restarted();
     }
 
-    /**
-     * 这一帧还能不能提交。在途帧到上限就先跳过：队列越积越深会让测量断供，
-     * 采样量冻住不动（见 GpuTimer.canSubmit()）。
-     */
     public readyForNextFrame(): boolean {
         return this.timer.canSubmit();
     }
 
-    /**
-     * 提交一帧。先应用 canvas 尺寸变化（deferred resize：在 getCurrentTexture 之前），
-     * 尺寸为 0（canvas 尚未布局）时跳过整帧。返回是否实际提交了渲染。
-     */
     public renderFrame(): boolean {
         this.context.applyResizeIfNeeded();
         if (this.context.width() === 0 || this.context.height() === 0) return false;
@@ -104,3 +131,6 @@ export class Frame {
         this.timer.destroy();
     }
 }
+
+/** 契约层类绑定的赋值。 */
+Frame = FrameImpl;
