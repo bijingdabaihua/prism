@@ -39,11 +39,6 @@ export interface CameraHandle {
      * `background.setRotation` → `scene.load`；装载几何不会改机位。
      */
     set(spec: CameraView): void;
-    /**
-     * 回到场景自带的机位；还没装场景时回到内置的默认机位
-     * （原点、5 m 远、水平视线、垂直视野 60°）。
-     */
-    reset(): void;
     /** 视口尺寸（物理像素）。宽高比跟着它走。 */
     resize(size: ViewportSize): void;
     /** 绕 target 旋转，单位弧度。phi 夹在 (0, π) 之间，翻不过头顶。 */
@@ -73,7 +68,6 @@ export interface CameraHandle {
 /** 机位命令：全部是「照做」的写操作，没有返回值。 */
 export type CameraCommand =
     | { type: 'set'; spec: CameraView }
-    | { type: 'reset' }
     | { type: 'resize'; size: ViewportSize }
     | { type: 'orbit'; deltaTheta: number; deltaPhi: number }
     | { type: 'zoom'; factor: number }
@@ -104,10 +98,6 @@ class RpcCamera implements CameraHandle {
 
     public set(spec: CameraView): void {
         this.rpc.send({ type: 'camera', command: { type: 'set', spec } });
-    }
-
-    public reset(): void {
-        this.rpc.send({ type: 'camera', command: { type: 'reset' } });
     }
 
     public resize(size: ViewportSize): void {

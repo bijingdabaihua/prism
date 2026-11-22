@@ -87,14 +87,6 @@ export interface MeshBuilder {
      */
     addQuad(corners: [Vec3, Vec3, Vec3, Vec3], material: number, uv?: UvProjection): void;
 
-    /**
-     * 轴对齐立方体：中心在原点，边长 size（米），六个面各一个四边形。
-     *
-     * 只用来做占位 / 管线自检 —— 一个没有贴图的盒子，光照、阴影、法线
-     * 是不是对的，一眼就能看出来。
-     */
-    addBox(size: number, material: number): void;
-
     /** 打包成 Mesh。顶点不跨四边形共享。 */
     build(materials: readonly PBRMaterial[], name?: string): Mesh;
 }
@@ -470,21 +462,6 @@ class MeshBuilderImpl implements MeshBuilder {
         }
         this.pushTriangle(base, base + 1, base + 2, material);
         this.pushTriangle(base, base + 2, base + 3, material);
-    }
-
-    public addBox(size: number, material: number): void {
-        const h = size * 0.5;
-        const v = (x: number, y: number, z: number): Vec3 => ({ x: x * h, y: y * h, z: z * h });
-        // 每个面的顶点顺序保证 cross(b-a, c-a) 朝向盒子外侧
-        const faces: [Vec3, Vec3, Vec3, Vec3][] = [
-            [v(-1, -1, 1), v(1, -1, 1), v(1, 1, 1), v(-1, 1, 1)],
-            [v(1, -1, -1), v(-1, -1, -1), v(-1, 1, -1), v(1, 1, -1)],
-            [v(1, -1, 1), v(1, -1, -1), v(1, 1, -1), v(1, 1, 1)],
-            [v(-1, -1, -1), v(-1, -1, 1), v(-1, 1, 1), v(-1, 1, -1)],
-            [v(-1, 1, 1), v(1, 1, 1), v(1, 1, -1), v(-1, 1, -1)],
-            [v(-1, -1, -1), v(1, -1, -1), v(1, -1, 1), v(-1, -1, 1)],
-        ];
-        for (const face of faces) this.addQuad(face, material);
     }
 
     public build(materials: readonly PBRMaterial[], name?: string): Mesh {

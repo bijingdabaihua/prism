@@ -102,30 +102,18 @@ export interface Camera {
     readyForNextFrame(): boolean;
     /** 上一帧是否重开了累积 —— 渲染循环据此切换采样预算档位。 */
     restarted(): boolean;
-    /** 每帧 GPU 预算（毫秒）。 */
+    /** 每帧 GPU 预算（毫秒）—— 渲染循环通过 FrameSource 结构类型调到。 */
     setTargetFrameMs(ms: number): void;
-    eye(): Vec3;
     vpMatrix(): Mat4;
     invViewProj(): Mat4;
     /**
-     * 装载场景机位。近远平面跟着距离走，外部只报距离。
+     * 整套机位一次装进来：场景机位、运镜关键帧都走这一条。
      *
-     * 没有「按包围盒自动取景」这条退路：自动取景在画廊里永远是错的构图 ——
-     * 相机会退到刚好看全整个场景的地方，而画廊要的是场景作者选的那一格。
+     * 近远平面跟着距离走，外部只报距离。没有「按包围盒自动取景」这条退路：
+     * 自动取景在画廊里永远是错的构图 —— 相机会退到刚好看全整个场景的地方，
+     * 而画廊要的是场景作者选的那一格。
      */
-    setView(target: Vec3, distance: number, theta: number, phi: number): void;
-    /** 整套机位一次装进来：场景机位、运镜关键帧都走这一条。 */
     applyView(view: CameraView): void;
-    /** 回到最近一次整套装进来的机位 —— 观察者运镜之后的复位。 */
-    reset(): void;
-    setFovY(radians: number): void;
-    /**
-     * 镜头：光圈半径 + 对焦距离，两个都是米。任一个为 0 就退回针孔。
-     *
-     * 单位是米而不是 f 值，因为引擎不知道传感器多大 —— 焦距只活在 fovY 里。
-     * 场景作者要把「50 mm 开 f/2.8」换成年半径，那是取景的问题，不是渲染的问题。
-     */
-    setLens(apertureRadius: number, focusDistance: number): void;
     /** 视口尺寸（物理像素）—— 主线程量好送进来，画布、相机和各 pass 一起变。 */
     setSize(width: number, height: number): void;
     orbitTheta(delta: number): void;
@@ -152,8 +140,6 @@ class CameraImpl implements Camera {
     private apertureRadius = 0;
     /** 对焦距离（米）。0 = 无穷远。 */
     private focusDistance = 0;
-    /** 最近一次整套装进来的机位；reset() 回到这里。 */
-    private sceneView: CameraView | null = null;
     private aspect = 16 / 9;
     private near = 0.01;
     private far = 100;
@@ -238,10 +224,6 @@ class CameraImpl implements Camera {
         this.frame.setTargetFrameMs(ms);
     }
 
-    public eye(): Vec3 {
-        return this.computeEye();
-    }
-
     public vpMatrix(): Mat4 {
         const view = Mat4.lookAt(this.computeEye(), this.target, { x: 0, y: 1, z: 0 });
         return Mat4.perspective(this.fovYRads, this.aspect, this.near, this.far).multiply(view);
@@ -251,36 +233,10 @@ class CameraImpl implements Camera {
         return this.vpMatrix().invert();
     }
 
-    public setView(target: Vec3, distance: number, theta: number, phi: number): void {
-        this.target = target;
-        this.orbitDist = Math.max(distance, 0.01);
-        this.theta = theta;
-        this.phi = Math.max(0.01, Math.min(Math.PI - 0.01, phi));
-        this.near = this.orbitDist * 0.01;
-        this.far = Math.max(this.orbitDist * 10, 100);
-        this.dirty = true;
-    }
-
     public applyView(view: CameraView): void {
-        this.sceneView = view;
         this.setFovY(view.fovY);
         this.setView(view.target, view.distance, view.theta, view.phi);
         this.setLens(view.apertureRadius ?? 0, view.focusDistance ?? 0);
-    }
-
-    public reset(): void {
-        this.applyView(this.sceneView ?? DEFAULT_VIEW);
-    }
-
-    public setFovY(radians: number): void {
-        this.fovYRads = radians;
-        this.dirty = true;
-    }
-
-    public setLens(apertureRadius: number, focusDistance: number): void {
-        this.apertureRadius = Math.max(0, apertureRadius);
-        this.focusDistance = Math.max(0, focusDistance);
-        this.dirty = true;
     }
 
     public setSize(width: number, height: number): void {
@@ -356,16 +312,35 @@ class CameraImpl implements Camera {
             this.target.z + this.orbitDist * sp * st,
         );
     }
-}
 
-/** 还没装过场景时的占位机位 —— 和类里的初始值保持一致。 */
-const DEFAULT_VIEW: CameraView = {
-    target: { x: 0, y: 0, z: 0 },
-    distance: 5,
-    theta: 0,
-    phi: Math.PI / 3,
-    fovY: Math.PI / 3,
-};
+    /** 机位四元组：目标点 + 距离 + 两个角。近远平面跟着距离走。 */
+    private setView(target: Vec3, distance: number, theta: number, phi: number): void {
+        this.target = target;
+        this.orbitDist = Math.max(distance, 0.01);
+        this.theta = theta;
+        this.phi = Math.max(0.01, Math.min(Math.PI - 0.01, phi));
+        this.near = this.orbitDist * 0.01;
+        this.far = Math.max(this.orbitDist * 10, 100);
+        this.dirty = true;
+    }
+
+    private setFovY(radians: number): void {
+        this.fovYRads = radians;
+        this.dirty = true;
+    }
+
+    /**
+     * 镜头：光圈半径 + 对焦距离，两个都是米。任一个为 0 就退回针孔。
+     *
+     * 单位是米而不是 f 值，因为引擎不知道传感器多大 —— 焦距只活在 fovY 里。
+     * 场景作者要把「50 mm 开 f/2.8」换成年半径，那是取景的问题，不是渲染的问题。
+     */
+    private setLens(apertureRadius: number, focusDistance: number): void {
+        this.apertureRadius = Math.max(0, apertureRadius);
+        this.focusDistance = Math.max(0, focusDistance);
+        this.dirty = true;
+    }
+}
 
 interface Listener {
     readonly intervalMs: number;

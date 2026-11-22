@@ -196,9 +196,6 @@ class WorkerHost {
             case 'set':
                 camera.applyView(command.spec);
                 return;
-            case 'reset':
-                camera.reset();
-                return;
             case 'orbit':
                 camera.orbitTheta(command.deltaTheta);
                 camera.orbitPhi(command.deltaPhi);
