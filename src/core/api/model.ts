@@ -28,9 +28,9 @@ export interface InstancePlacement {
  * 模型句柄 —— 场景几何的远程入口。
  *
  * 两个入口，语义都是追加到当前场景，不是替换：
- * - `loadGltf` 递资产包字节，解码成 Instance 全在 Worker；
- * - `loadInstance` 递 app 在主线程构造好的 IR Instance（如程序化地面），
- *   句柄侧编码成线上形态（`ir/wire.ts`），Worker 解码复活后再编译。
+ * - `loadGltf` 递资产包字节，解析、摆位、解码全在 Worker；
+ * - `loadInstances` 递 app 在主线程构造好的一组 IR Instance（如程序化地面），
+ *   句柄侧编码成线上形态，Worker 解码复活后再编译。
  */
 export interface ModelHandle {
     /**
@@ -38,17 +38,22 @@ export interface ModelHandle {
      *
      * `source` 是资产包字节：自包含 `.glb`、内嵌资源的 `.gltf`，或带
      * `.bin` / 贴图的 `.zip`。URL 也由调用方自己 fetch 成 Blob 再传进来 ——
-     * 主线程只递字节，解析和解包都在 Worker。
+     * 主线程只递字节，解析、解包和贴图解码都在 Worker。
+     *
+     * `placement` 给整组实例再加一层摆放（语义同 `placeInstances`）。放在
+     * Worker 里做，主线程就不必为了摆一个模型先把它整个解析一遍。
      */
-    loadGltf(source: Blob): Promise<void>;
+    loadGltf(source: Blob, placement?: InstancePlacement): Promise<void>;
     /**
-     * 追加一个外部构造好的 Instance。
+     * 追加一组外部构造好的 Instance。
      *
      * 典型用途是程序化几何（`MeshBuilder` 铺的地面等）：几何和材质在主线程
      * 造好，跨线程时由 `Instance.encode` 编成裸数据，Worker 侧 `Instance.decode`
      * 复活成 IR 类实例。贴图字段须是解码后的 `Image`（IR 里不留文件路径）。
+     *
+     * 一批一次请求：地面铺 9 块砖就是 9 个 Instance，但只编译一次。
      */
-    loadInstance(instance: Instance): Promise<void>;
+    loadInstances(instances: readonly Instance[]): Promise<void>;
 }
 
 /**
@@ -59,8 +64,8 @@ export interface ModelHandle {
 
 /** 模型相关的 Worker 消息。 */
 export type ModelRequest =
-    | { type: 'model/loadGltf'; id: number; source: Blob }
-    | { type: 'model/loadInstance'; id: number; instance: WireInstance };
+    | { type: 'model/loadGltf'; id: number; source: Blob; placement?: InstancePlacement }
+    | { type: 'model/loadInstances'; id: number; instances: WireInstance[] };
 
 /** 模型句柄需要的最小 RPC 面：一次带返回值的请求。 */
 export interface ModelRpc {
@@ -71,15 +76,15 @@ export interface ModelRpc {
 class RpcModel implements ModelHandle {
     constructor(private readonly rpc: ModelRpc) {}
 
-    public loadGltf(source: Blob): Promise<void> {
-        return this.rpc.request<void>((id) => ({ type: 'model/loadGltf', id, source }));
+    public loadGltf(source: Blob, placement?: InstancePlacement): Promise<void> {
+        return this.rpc.request<void>((id) => ({ type: 'model/loadGltf', id, source, placement }));
     }
 
-    public loadInstance(instance: Instance): Promise<void> {
+    public loadInstances(instances: readonly Instance[]): Promise<void> {
         return this.rpc.request<void>((id) => ({
-            type: 'model/loadInstance',
+            type: 'model/loadInstances',
             id,
-            instance: Instance.encode(instance),
+            instances: instances.map((instance) => Instance.encode(instance)),
         }));
     }
 }

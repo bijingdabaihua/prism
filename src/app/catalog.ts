@@ -4,7 +4,7 @@ import type { CameraView, InstancePlacement } from '../core/api/prism';
  * 场景元数据：画廊卡片 + 外面装场景要用的机位 / 环境图 / 几何清单。
  *
  * 纯数据：不 import 任何场景构建器 / 导入器。装配逻辑在 `assemble.ts`
- * （渲染页才加载），清单本身画廊和渲染页都能安全读。
+ * 的 `loadScene` 里，清单本身画廊和渲染页都能安全读。
  *
  * 装场景的顺序由外部决定：先 `camera.set`，再 `background.setImage` /
  * `background.setRotation`，然后逐个装几何，最后 `camera.listen`。

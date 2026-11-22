@@ -20,13 +20,14 @@
  * 所以没有对称的 teardown 路径。
  */
 // 纯类型导入：消息协议和门面同文件，编译后这条边会完全擦除。
-import type { CameraCommand, WorkerRequest, WorkerResponse } from '../api/prism';
+import type { CameraCommand, InstancePlacement, WorkerRequest, WorkerResponse } from '../api/prism';
 import { createDevice, WebGPUUnavailableError } from './camera/context';
 import { Camera } from './camera/camera';
 import { Background } from './background/background';
 import { Model } from './model/model';
 import { loadImage } from './model/image';
-import { Instance } from './model/instance';
+import { Instance, placeInstances } from './model/instance';
+import type { WireInstance } from './model/instance';
 
 /**
  * Worker 的运行态：三个模块 + 一条串行队列。
@@ -73,10 +74,10 @@ class WorkerHost {
                 this.enqueue(() => this.setRotation(request.id, request.rotation));
                 return;
             case 'model/loadGltf':
-                this.enqueue(() => this.loadGltf(request.id, request.source));
+                this.enqueue(() => this.loadGltf(request.id, request.source, request.placement));
                 return;
-            case 'model/loadInstance':
-                this.enqueue(() => this.loadInstance(request.id, request.instance));
+            case 'model/loadInstances':
+                this.enqueue(() => this.loadInstances(request.id, request.instances));
                 return;
         }
     }
@@ -146,13 +147,16 @@ class WorkerHost {
     /**
      * 加载一个 glTF 文件里的全部 Instance，追加到当前场景。
      *
-     * 与场景配方入口一样，最终都落到 `model.add`。模型入口都是追加语义，
-     * 外部可以一个一个调用，把多个来源拼进同一个场景。
+     * 解析、贴图解码和可选的整体摆位都在这里做：主线程只递字节和摆放参数。
+     * 与程序化几何入口一样，最终都落到 `model.add`；两个入口都是追加语义，
+     * 外部可以分多次调用，把多个来源拼进同一个场景。
      */
-    private async loadGltf(id: number, source: Blob): Promise<void> {
+    private async loadGltf(id: number, source: Blob, placement?: InstancePlacement): Promise<void> {
         try {
             if (!this.model) throw new Error('Prism 还没初始化');
-            this.model.add(await Instance.buildByGltf(source));
+            const instances = await Instance.buildByGltf(source);
+            if (placement) placeInstances(instances, placement);
+            this.model.add(instances);
             this.reply(id, undefined);
         } catch (err) {
             this.failure(id, err instanceof Error ? err.message : String(err));
@@ -160,17 +164,18 @@ class WorkerHost {
     }
 
     /**
-     * 追加一个外部构造好的 Instance。
+     * 追加一组外部构造好的 Instance。
      *
      * 主线程用 `Instance.encode` 把 IR 编成裸数据发过来（类实例过不了线程
      * 边界），这里 `Instance.decode` 校验并复活成 IR 类实例，再走同一条
      * `model.add`。典型来源是程序化几何：地面这类东西在 app 侧造好，
-     * 不从 glTF 走。
+     * 不从 glTF 走。一批只编译一次 —— 一块地砖对应一个 Instance，但不是
+     * 一次请求。
      */
-    private async loadInstance(id: number, wire: unknown): Promise<void> {
+    private async loadInstances(id: number, wires: readonly WireInstance[]): Promise<void> {
         try {
             if (!this.model) throw new Error('Prism 还没初始化');
-            this.model.add([Instance.decode(wire)]);
+            this.model.add(wires.map((wire) => Instance.decode(wire)));
             this.reply(id, undefined);
         } catch (err) {
             this.failure(id, err instanceof Error ? err.message : String(err));
