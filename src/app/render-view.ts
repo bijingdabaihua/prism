@@ -1,6 +1,6 @@
 import { Prism, PrismUnsupportedError } from '../core/api/prism';
-import { SCENE_CARDS } from './scenes/catalog';
-import { fetchBlob, loadGeometry } from './scenes/assemble';
+import { SCENE_CARDS } from './catalog';
+import { fetchBlob, loadGeometry } from './assemble';
 
 /** 场景编译完之后，再给 Worker 这么久把画面铺满，然后撤 loading。 */
 const LOADING_HOLD_MS = 1500;
@@ -277,7 +277,6 @@ export class RenderView {
     private pan(dx: number, dy: number): void {
         this.prism?.camera.pan(dx, dy);
     }
-
 }
 
 function touchDistance(e: TouchEvent): number {

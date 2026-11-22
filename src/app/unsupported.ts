@@ -1,4 +1,4 @@
-import type { SceneCard } from './scenes/catalog';
+import type { SceneCard } from './catalog';
 
 /**
  * 降级页：浏览器没有 WebGPU 时替代渲染页。

@@ -1,4 +1,4 @@
-import type { CameraView, InstancePlacement } from '../../core/api/prism';
+import type { CameraView, InstancePlacement } from '../core/api/prism';
 
 /**
  * 场景元数据：画廊卡片 + 外面装场景要用的机位 / 环境图 / 几何清单。
@@ -90,7 +90,7 @@ const SUN_ROTATION = ENV_ROTATION + 0.6;
  * phi 是从 +Y 量的极角：64.2° 时相机水平退开 1.48 m、抬起 0.72 m。
  */
 const VASE_CAMERA: CameraView = {
-    target: { x: 0, y: 0.22, z: -0.10 },
+    target: { x: 0, y: 0.22, z: -0.1 },
     distance: 1.646,
     theta: 0.0,
     phi: 1.12,

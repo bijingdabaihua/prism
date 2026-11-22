@@ -1,4 +1,4 @@
-import { SCENE_CARDS } from './scenes/catalog';
+import { SCENE_CARDS } from './catalog';
 import { GalleryView } from './gallery';
 import { RenderView } from './render-view';
 import { UnsupportedView } from './unsupported';

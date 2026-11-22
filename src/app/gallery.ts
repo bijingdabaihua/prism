@@ -1,4 +1,4 @@
-import { SCENE_CARDS } from './scenes/catalog';
+import { SCENE_CARDS } from './catalog';
 
 /**
  * 画廊 —— 打开就能看到的东西。一张卡片一个场景，点进去实时渲染。
