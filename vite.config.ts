@@ -2,6 +2,9 @@ import { defineConfig } from 'vite';
 
 export default defineConfig({
   root: 'src/app',
+  // GitHub Pages 项目页挂在 /Prism/ 下；本地 dev 和普通静态托管仍在根。
+  // 只有 Actions 里构建时才加前缀，本地 npm run build 的产物仍然可直接预览。
+  base: process.env.GITHUB_ACTIONS ? '/Prism/' : '/',
   // 资产（模型 / 贴图 / 环境图 / 画廊封面）原样发布到站点根目录
   publicDir: '../../assets',
   server: {

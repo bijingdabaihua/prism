@@ -13,7 +13,7 @@ import type { CameraView, InstancePlacement } from '../core/api/prism';
 /** 一片程序化地面：一块带位移材质的四边形按 `tile` 铺成网格。 */
 export interface TiledGroundGeometry {
     type: 'tiled-ground';
-    /** 材质压缩包 URL（zip：内嵌 `.blend` + 贴图目录）。 */
+    /** 材质压缩包 URL（zip：内嵌 `.blend` + 贴图目录），相对于站点根。 */
     material: string;
     /** 一格贴图覆盖的真实尺寸（米），也是砖边长。 */
     tile: number;
@@ -27,7 +27,7 @@ export interface TiledGroundGeometry {
 /** 一个 glTF 资产包：整包进来；给 `placement` 时由外部解析后按摆放追加。 */
 export interface GltfGeometry {
     type: 'gltf';
-    /** `.gltf` / `.glb` / `.zip` 资产包 URL。 */
+    /** `.gltf` / `.glb` / `.zip` 资产包 URL，相对于站点根。 */
     url: string;
     /** 省略 = 保留文件里的变换。 */
     placement?: InstancePlacement;
@@ -39,7 +39,7 @@ export type SceneGeometry = TiledGroundGeometry | GltfGeometry;
 export interface SceneSetup {
     /** 构图。换一套机位就是另一张图，所以它是场景的一部分。 */
     camera: CameraView;
-    /** 环境图 URL；渲染页取成 Blob 交给 Worker 解码。 */
+    /** 环境图 URL，相对于站点根；渲染页取成 Blob 交给 Worker 解码。 */
     env: string;
     /** 环境图绕 +y 的旋转（弧度），省略 = 原图方向。 */
     envRotation?: number;
@@ -51,7 +51,7 @@ export interface SceneCard {
     subtitle: string;
     /** 卡片上的技术标签，让人一眼看到用了什么 */
     tags: string[];
-    /** 画廊封面；缺省时卡片显示占位底纹。放在 assets/gallery/<key>.png */
+    /** 画廊封面，相对于站点根；缺省时卡片显示占位底纹。文件放 assets/gallery/<key>.png */
     cover?: string;
     setup: SceneSetup;
     /** 几何清单；按顺序交给 `assemble.ts` 装配。 */
@@ -111,7 +111,7 @@ const VASE_CAMERA: CameraView = {
 const VASE_ON_DIRT_GEOMETRY: SceneGeometry[] = [
     {
         type: 'tiled-ground',
-        material: '/textures/forest_ground_06.zip',
+        material: 'textures/forest_ground_06.zip',
         // 一格贴图 2.11 m；砖心落在 ±2.11，铺出来正好 3×3 块、6.33 m 见方。
         tile: 2.11,
         x0: -2.11,
@@ -121,13 +121,13 @@ const VASE_ON_DIRT_GEOMETRY: SceneGeometry[] = [
     },
     {
         type: 'gltf',
-        url: '/model/antique_ceramic_vase_01_1k.zip',
+        url: 'model/antique_ceramic_vase_01_1k.zip',
         // 罐子正对原点：底面就在 y = 0，直接坐在砂土上。
         placement: { position: { x: 0, y: 0, z: 0 }, rotationY: 0.4 },
     },
     {
         type: 'gltf',
-        url: '/model/dead_quiver_branch_01_1k.zip',
+        url: 'model/dead_quiver_branch_01_1k.zip',
         // 枯枝躺在地上：绕 X 放倒 90°，再绕 Y 转 22° 斜着躺进画面右下角。
         // 抬 9 cm 是因为放倒之后最低点（原来是 −z 方向的那一侧）在 y = −0.097，
         // 少抬 7 mm 让它陷进土里一点，别像搁在玻璃上。
@@ -144,10 +144,10 @@ export const SCENE_CARDS: Readonly<Record<string, SceneCard>> = {
         title: '荒地',
         subtitle: '青花瓷罐搁在夕阳下的砂土上，一片平地铺到画外，只剩土和光',
         tags: ['实例化地表', '薄透镜景深', 'glTF 资产'],
-        cover: '/gallery/vase-on-dirt.png',
+        cover: 'gallery/vase-on-dirt.png',
         setup: {
             camera: VASE_CAMERA,
-            env: '/env/sundowner_overlook_2k.exr',
+            env: 'env/sundowner_overlook_2k.exr',
             envRotation: SUN_ROTATION,
         },
         geometry: VASE_ON_DIRT_GEOMETRY,
