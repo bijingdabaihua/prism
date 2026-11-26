@@ -27,6 +27,7 @@ export class RenderView {
     private resizeObserver: ResizeObserver | null = null;
     private stopListening: (() => void) | null = null;
     private disposed = false;
+    private readonly workbenchAbort = new AbortController();
     private readonly controls = new OrbitControls();
     private readonly key: string;
     /** 有 WebGPU API、但拿不到设备时交给外层换成降级页。 */
@@ -85,14 +86,14 @@ export class RenderView {
             }
 
             // 画面从这一条流里来：Worker 每帧推一张 ImageBitmap，贴上即显示
-            const workbench = createWorkbench(prism, card, canvas, this.key);
+            const workbench = card.adjustEmission ? createWorkbench(prism, this.workbenchAbort.signal) : null;
             this.stopListening = prism.camera.listen(FRAME_INTERVAL_MS, (bitmap) => {
                 if (!this.context) {
                     bitmap.close();
                     return;
                 }
                 this.context.transferFromImageBitmap(bitmap);
-                if (!workbench.isConnected && !this.disposed) stage.appendChild(workbench);
+                if (workbench && !workbench.isConnected && !this.disposed) stage.appendChild(workbench);
             });
             this.controls.attach(canvas, prism.camera);
 
@@ -113,6 +114,7 @@ export class RenderView {
 
     public unmount(): void {
         this.disposed = true;
+        this.workbenchAbort.abort();
         this.stopListening?.();
         this.stopListening = null;
         this.resizeObserver?.disconnect();

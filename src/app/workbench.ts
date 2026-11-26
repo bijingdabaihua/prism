@@ -1,71 +1,51 @@
 import type { Prism } from '../core/api/prism';
-import type { SceneCard } from './catalog';
+import { requestEmissionCommand } from '../agent/emission-command';
 
-/** 在当前渲染画布上挂载默认折叠的工作台。 */
-export let createWorkbench: (prism: Prism, card: SceneCard, canvas: HTMLCanvasElement, key: string) => HTMLElement;
+/** 当前发光场景的文字指令面板。 */
+export let createWorkbench: (prism: Prism, signal: AbortSignal) => HTMLElement;
 
 // ═══════════════════════ 实现层（不导出） ═══════════════════════
 
-createWorkbench = (prism, card, canvas, key) => {
-    const workbench = document.createElement('details');
-    workbench.className = 'workbench';
-    workbench.innerHTML = `
-        <summary>调参数</summary>
-        <div class="workbench-panel">
-            <div class="workbench-actions">
-                <button type="button" data-reset>恢复默认</button>
-                <button type="button" data-save>保存 PNG</button>
-            </div>
+createWorkbench = (prism, signal) => {
+    const panel = document.createElement('details');
+    panel.className = 'workbench';
+    panel.innerHTML = `
+        <summary>AI 调场景</summary>
+        <form class="workbench-panel">
+            <label>场景指令
+                <input type="text" maxlength="500" required placeholder="例如：把面板调暗一点">
+            </label>
+            <button type="submit">执行</button>
             <p role="status"></p>
-        </div>
+        </form>
     `;
-
-    const panel = workbench.querySelector('.workbench-panel')!;
-    const status = workbench.querySelector('p')!;
-    const reset = workbench.querySelector<HTMLButtonElement>('[data-reset]')!;
-    const save = workbench.querySelector<HTMLButtonElement>('[data-save]')!;
-    let resetEmission: (() => void) | undefined;
-    if (card.adjustEmission) {
-        const label = document.createElement('label');
-        label.innerHTML = `<span>发光亮度 <output>1.00×</output></span>
-            <input type="range" min="0" max="3" step="0.05" value="1">`;
-        const slider = label.querySelector('input')!;
-        const value = label.querySelector('output')!;
-        const apply = (): void => {
-            const scale = slider.valueAsNumber;
-            value.textContent = `${scale.toFixed(2)}×`;
-            void prism.model.setEmissionScale(scale).catch((err: unknown) => {
-                if (workbench.isConnected) status.textContent = err instanceof Error ? err.message : String(err);
-            });
-        };
-        slider.addEventListener('input', apply);
-        resetEmission = () => {
-            slider.value = '1';
-            apply();
-        };
-        panel.prepend(label);
-    }
-
-    reset.addEventListener('click', () => {
-        status.textContent = '';
-        prism.camera.set(card.setup.camera);
-        resetEmission?.();
-    });
-    save.addEventListener('click', () => {
-        status.textContent = '';
-        canvas.toBlob((blob) => {
-            if (!workbench.isConnected) return;
-            if (!blob) {
-                status.textContent = '无法保存当前画面';
+    const form = panel.querySelector('form')!;
+    const input = panel.querySelector('input')!;
+    const button = panel.querySelector('button')!;
+    const status = panel.querySelector('p')!;
+    let current = 1;
+    form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const prompt = input.value.trim();
+        if (!prompt || button.disabled) return;
+        button.disabled = true;
+        status.textContent = '正在理解指令…';
+        try {
+            const next = await requestEmissionCommand(prompt, current, signal);
+            if (signal.aborted) return;
+            if (next === null) {
+                status.textContent = '当前场景可以调整发光面板的亮度，请试试「把灯调暗一点」。';
                 return;
             }
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = `prism-${key}.png`;
-            link.click();
-            window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-        }, 'image/png');
+            await prism.model.setEmissionScale(next);
+            if (signal.aborted) return;
+            current = next;
+            status.textContent = `发光亮度已设为 ${Math.round(next * 100)}%。`;
+        } catch (err) {
+            if (!signal.aborted) status.textContent = err instanceof Error ? err.message : String(err);
+        } finally {
+            button.disabled = false;
+        }
     });
-    return workbench;
+    return panel;
 };

@@ -28,6 +28,13 @@ npm run dev        # http://localhost:5173
 Firefox 需要 `dom.webgpu.enabled`。不支持时会落到静态页 —— 渲染出来的图和
 一段说明，至少不会白屏。
 
+## AI 工作台
+
+「发光面板」右上角的「AI 调场景」接受文字指令，例如「把灯调暗一点」。
+本地在仓库根目录的 `.env.local` 设置 `VITE_PUBLIC_DEEPSEEK_API_KEY`，再重启 `npm run dev`。
+GitHub Pages 使用同名 GitHub Actions 仓库变量，设置后重新运行部署流程。
+此变量会打包到公开网页，适用于专门用于公开演示的凭据。未配置时画廊仍可正常浏览。
+
 ## 实现了什么
 
 **求交**

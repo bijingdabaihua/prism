@@ -31,9 +31,11 @@ jobs:
       - run: npm ci
 
       # 构建产物在 dist/app（vite outDir 是 ../../dist/app）。
-      # GITHUB_ACTIONS=true 时 vite.config.ts 会把 base 设成 /Prism/，
+      # GITHUB_ACTIONS=true 时 vite.config.ts 会把 base 设成 /prism/，
       # 所以项目页路径下的 JS / Worker / 静态资源都能正确解析。
       - run: npm run build
+        env:
+          VITE_PUBLIC_DEEPSEEK_API_KEY: ${{ vars.VITE_PUBLIC_DEEPSEEK_API_KEY }}
 
       - uses: actions/configure-pages@v5
 
