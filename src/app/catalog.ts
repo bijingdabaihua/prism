@@ -33,7 +33,7 @@ export interface GltfGeometry {
     placement?: InstancePlacement;
 }
 
-export type SceneGeometry = TiledGroundGeometry | GltfGeometry;
+export type SceneGeometry = TiledGroundGeometry | GltfGeometry | { type: 'glass-study' };
 
 /** 渲染器需要、几何之外的场景参数。 */
 export interface SceneSetup {
@@ -140,6 +140,26 @@ const VASE_ON_DIRT_GEOMETRY: SceneGeometry[] = [
 ];
 
 export const SCENE_CARDS: Readonly<Record<string, SceneCard>> = {
+    'glass-study': {
+        title: '玻璃球',
+        subtitle: '透过玻璃球观察棋盘格的折射，沿球的边缘观察环境反射',
+        tags: ['玻璃透射', '菲涅耳反射', '程序化几何'],
+        cover: 'gallery/glass-study.png',
+        setup: {
+            camera: {
+                target: { x: 0, y: 0.46, z: 0 },
+                distance: 3.5,
+                theta: 0.3,
+                phi: 0.88,
+                fovY: 0.52,
+                apertureRadius: 0,
+                focusDistance: 0,
+            },
+            env: 'env/sundowner_overlook_2k.exr',
+            envRotation: SUN_ROTATION,
+        },
+        geometry: [{ type: 'glass-study' }],
+    },
     'vase-on-dirt': {
         title: '荒地',
         subtitle: '青花瓷罐搁在夕阳下的砂土上，一片平地铺到画外，只剩土和光',

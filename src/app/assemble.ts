@@ -1,5 +1,6 @@
 import type { ModelHandle, Prism } from '../core/api/prism';
 import type { SceneCard, SceneGeometry } from './catalog';
+import { buildGlassStudy } from './glass-study';
 import { buildTiledGround } from './ground';
 
 /**
@@ -24,7 +25,7 @@ export async function loadScene(prism: Prism, card: SceneCard): Promise<void> {
 }
 
 /**
- * 按清单顺序装几何。两种条目对应两个模型入口：
+ * 按清单顺序装几何。程序化几何走实例入口：
  * - `tiled-ground`：主线程造好一批 Instance，一次请求推给 Worker；
  * - `gltf`：只递资产包字节，解析、贴图解码和摆位都在 Worker 里做。
  */
@@ -33,6 +34,8 @@ async function loadGeometry(model: ModelHandle, geometry: readonly SceneGeometry
         if (object.type === 'tiled-ground') {
             const material = await fetchBlob(object.material);
             await model.loadInstances(await buildTiledGround(material, object));
+        } else if (object.type === 'glass-study') {
+            await model.loadInstances(buildGlassStudy());
         } else {
             await model.loadGltf(await fetchBlob(object.url), object.placement);
         }

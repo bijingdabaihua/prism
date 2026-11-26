@@ -40,6 +40,9 @@ struct SurfaceInfo {
   // 环境光遮蔽（0..1）：只衰减从这个点继续弹出去的间接光，直射光不乘。
   ao: f32,
   hit: bool,
+  transmission: f32,
+  eta: f32,
+  smooth_normal: vec3<f32>,
 }
 
 // Evaluate material at a hit point — no lighting, used by bounce loop
@@ -53,11 +56,11 @@ fn material_slot(global_triangle_index: u32) -> u32 {
 fn compute_surface(ray: Ray, hit: BVHResult) -> SurfaceInfo {
   // Miss — no geometry at all; store ray direction in wo for env map sampling
   if (hit.t <= 0.0) {
-    return SurfaceInfo(vec3(0.0), vec3(0.0), vec3(0.0), -ray.direction, vec3(0.0), 0.0, 0.0, 1.0, false);
+    return SurfaceInfo(vec3(0.0), vec3(0.0), vec3(0.0), -ray.direction, vec3(0.0), 0.0, 0.0, 1.0, false, 0.0, 1.0, vec3(0.0));
   }
 
   let inst = instances[hit.instance_index];
-  let o = material_slot(u32(hit.triangle_index)) * 28u;
+  let o = material_slot(u32(hit.triangle_index)) * 30u;
 
   var base_color = vec3(materials[o+0u], materials[o+1u], materials[o+2u]);
   // metallic / roughness 是 glTF 的 factor：有贴图时它们当乘数，没有时就是全部。
@@ -95,7 +98,8 @@ fn compute_surface(ray: Ray, hit: BVHResult) -> SurfaceInfo {
   var geo_local = cross(v1.position - v0.position, v2.position - v0.position);
   if (!(dot(geo_local, geo_local) > 0.0)) { geo_local = local_normal; }
   let world_geo = normalize((inst.transform * vec4<f32>(geo_local, 0.0)).xyz);
-  let facing_geo = select(-world_geo, world_geo, dot(world_geo, -ray.direction) > 0.0);
+  let entering = dot(world_geo, -ray.direction) > 0.0;
+  let facing_geo = select(-world_geo, world_geo, entering);
 
   let tangent_axis = normalize(world_tangent - facing_normal * dot(facing_normal, world_tangent));
   let bitangent_axis = cross(facing_normal, tangent_axis) * local_tangent.w;
@@ -174,6 +178,9 @@ fn compute_surface(ray: Ray, hit: BVHResult) -> SurfaceInfo {
     metallic,
     ao,
     true,
+    materials[o + 28u] * (1.0 - clamp(metallic, 0.0, 1.0)),
+    select(materials[o + 29u], 1.0 / materials[o + 29u], entering),
+    facing_normal,
   );
 }
 

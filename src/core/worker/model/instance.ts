@@ -340,6 +340,8 @@ function meshFingerprint(mesh: WireMesh): string {
                 m.baseColor,
                 m.metallic,
                 m.roughness,
+                m.transmission,
+                m.ior,
                 m.normalScale,
                 m.occlusionStrength,
                 m.displacementMid,

@@ -78,12 +78,46 @@ struct Scatter {
 // reached), so `hit` here is always a surface:
 //   probe escapes to env → env radiance (BSDF-weighted), terminate.
 //   probe hits surface   → alive, continue with `next`.
+// Smooth dielectric. Sampling by Fresnel cancels the selected lobe's probability.
+fn glass_direction(incident: vec3<f32>, normal: vec3<f32>, eta: f32, sample: f32) -> vec3<f32> {
+  if (eta == 1.0) { return incident; }
+  let cos_i = clamp(dot(-incident, normal), 0.0, 1.0);
+  let sin_t2 = eta * eta * (1.0 - cos_i * cos_i);
+  if (sin_t2 >= 1.0) { return reflect(incident, normal); }
+  let cos_t = sqrt(1.0 - sin_t2);
+  let rs = (eta * cos_i - cos_t) / (eta * cos_i + cos_t);
+  let rp = (cos_i - eta * cos_t) / (cos_i + eta * cos_t);
+  if (sample < 0.5 * (rs * rs + rp * rp)) { return reflect(incident, normal); }
+  return refract(incident, normal, eta);
+}
+
+fn scatter_glass(hit: SurfaceInfo, sample: f32) -> Scatter {
+  var direction = glass_direction(-hit.wo, hit.smooth_normal, hit.eta, sample);
+  // Interpolated normals can send a grazing ray to the wrong side of the triangle.
+  let reflected = dot(direction, hit.smooth_normal) > 0.0;
+  if (reflected != (dot(direction, hit.geo_normal) > 0.0)) {
+    direction = glass_direction(-hit.wo, hit.geo_normal, hit.eta, sample);
+  }
+  let exits_surface = dot(direction, hit.geo_normal) > 0.0;
+  let offset = select(-hit.geo_normal, hit.geo_normal, exits_surface) * 0.0001;
+  let weight = vec3(select(hit.eta * hit.eta, 1.0, exits_surface));
+  let next_hit = intersect_surface(Ray(hit.position + offset, normalize(direction)));
+  if (!next_hit.hit) {
+    return Scatter(weight * env_radiance(direction), vec3(0.0), false, next_hit);
+  }
+  return Scatter(vec3(0.0), weight, true, next_hit);
+}
+
 fn scatter(hit: SurfaceInfo, seed: u32, dim: ptr<function, u32>) -> Scatter {
   // hit is always a surface here — miss is handled by path_trace's zero-bounce
   // term, which breaks before calling scatter.
   let r1 = lds(seed, u.frame_index, *dim); *dim += 1u;
   let r2 = lds(seed, u.frame_index, *dim); *dim += 1u;
   let r3 = lds(seed, u.frame_index, *dim); *dim += 1u;
+  if (hit.transmission > 0.0) {
+    let lobe = lds(seed, u.frame_index, *dim); *dim += 1u;
+    if (lobe < hit.transmission) { return scatter_glass(hit, r1); }
+  }
   let bsdf = sample_bsdf(hit, r1, r2, r3);
   // 采到地平线以下（pdf = 0）：这个样本没有定义，直接终止路径
   if (bsdf.pdf <= 0.0) { return Scatter(vec3(0.0), vec3(0.0), false, hit); }
@@ -141,7 +175,9 @@ fn path_trace(ray: Ray, seed: u32, dim: ptr<function, u32>) -> vec3<f32> {
     }
 
     // NEE estimator
-    L += beta * direct_environment(hit, seed, dim);
+    if (hit.transmission < 1.0) {
+      L += beta * (1.0 - hit.transmission) * direct_environment(hit, seed, dim);
+    }
 
     // BSDF estimator
     let scat = scatter(hit, seed, dim);

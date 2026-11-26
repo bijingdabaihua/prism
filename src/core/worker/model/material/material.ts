@@ -45,6 +45,10 @@ export interface PBRMaterial {
     readonly baseColor: Color;
     readonly metallic: number;
     readonly roughness: number;
+    /** 光滑电介质透射的权重，范围 0–1。 */
+    readonly transmission: number;
+    /** 电介质相对于空气的折射率。 */
+    readonly ior: number;
     readonly baseColorTexture?: Image;
     /**
      * glTF 的 metallic-roughness 打包图：G = 粗糙度，B = 金属度，R = 环境光遮蔽。
@@ -110,6 +114,8 @@ export interface PBRMaterialOptions {
     baseColor?: Color;
     metallic?: number;
     roughness?: number;
+    transmission?: number;
+    ior?: number;
     baseColorTexture?: Image;
     metallicRoughnessTexture?: Image;
     roughnessTexture?: Image;
@@ -699,6 +705,8 @@ class PBRMaterialImpl implements PBRMaterial {
     public readonly baseColor: Color;
     public readonly metallic: number;
     public readonly roughness: number;
+    public readonly transmission: number;
+    public readonly ior: number;
     public readonly baseColorTexture?: Image;
     public readonly metallicRoughnessTexture?: Image;
     public readonly roughnessTexture?: Image;
@@ -714,6 +722,8 @@ class PBRMaterialImpl implements PBRMaterial {
         this.baseColor = options.baseColor ?? { r: 0.85, g: 0.85, b: 0.85, a: 1 };
         this.metallic = options.metallic ?? 0;
         this.roughness = options.roughness ?? 0.5;
+        this.transmission = Math.max(0, Math.min(1, options.transmission ?? 0));
+        this.ior = Math.max(1, options.ior ?? 1.5);
         this.baseColorTexture = options.baseColorTexture;
         this.metallicRoughnessTexture = options.metallicRoughnessTexture;
         this.roughnessTexture = options.roughnessTexture;
@@ -732,6 +742,8 @@ class PBRMaterialImpl implements PBRMaterial {
             baseColor: this.baseColor,
             metallic: this.metallic,
             roughness: this.roughness,
+            transmission: this.transmission,
+            ior: this.ior,
             baseColorTexture: atScale(this.baseColorTexture),
             metallicRoughnessTexture: atScale(this.metallicRoughnessTexture),
             roughnessTexture: atScale(this.roughnessTexture),
