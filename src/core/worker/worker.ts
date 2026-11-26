@@ -76,6 +76,15 @@ class WorkerHost {
             case 'model/loadGltf':
                 this.enqueue(() => this.loadGltf(request.id, request.source, request.placement));
                 return;
+            case 'model/setEmissionScale':
+                try {
+                    if (!this.model) throw new Error('Prism 还没初始化');
+                    this.model.setEmissionScale(request.scale);
+                    this.reply(request.id, undefined);
+                } catch (err) {
+                    this.failure(request.id, err instanceof Error ? err.message : String(err));
+                }
+                return;
             case 'model/loadInstances':
                 this.enqueue(() => this.loadInstances(request.id, request.instances));
                 return;

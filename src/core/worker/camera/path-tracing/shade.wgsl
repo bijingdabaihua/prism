@@ -182,7 +182,7 @@ fn compute_surface(ray: Ray, hit: BVHResult) -> SurfaceInfo {
     materials[o + 28u] * (1.0 - clamp(metallic, 0.0, 1.0)),
     select(materials[o + 29u], 1.0 / materials[o + 29u], entering),
     facing_normal,
-    vec3(materials[o + 30u], materials[o + 31u], materials[o + 32u]),
+    u.emission_scale * vec3(materials[o + 30u], materials[o + 31u], materials[o + 32u]),
   );
 }
 
@@ -412,7 +412,7 @@ fn emitter_pdf(origin: vec3<f32>, point: vec3<f32>, normal: vec3<f32>) -> f32 {
 
 fn direct_emitter(surf: SurfaceInfo, seed: u32, dim: ptr<function, u32>) -> vec3<f32> {
   let count = u32(emitters[0]);
-  if (count == 0u) { return vec3(0.0); }
+  if (count == 0u || u.emission_scale == 0.0) { return vec3(0.0); }
   let area = lds(seed, u.frame_index, *dim) * emitters[1]; *dim += 1u;
   let r1 = lds(seed, u.frame_index, *dim); *dim += 1u;
   let r2 = lds(seed, u.frame_index, *dim); *dim += 1u;
@@ -442,7 +442,7 @@ fn direct_emitter(surf: SurfaceInfo, seed: u32, dim: ptr<function, u32>) -> vec3
 
   let pdf = emitter_pdf(surf.position, point, normalize(cross(b - a, c - a)));
   let bsdf = evaluate_bsdf(-wi, surf.wo, surf.normal, surf.metallic, surf.roughness, surf.albedo);
-  let emission = vec3(emitters[i + 10u], emitters[i + 11u], emitters[i + 12u]);
+  let emission = u.emission_scale * vec3(emitters[i + 10u], emitters[i + 11u], emitters[i + 12u]);
   return bsdf.f * emission * cosine * mis_weight(pdf, bsdf.pdf) / max(pdf, 1e-12);
 }
 

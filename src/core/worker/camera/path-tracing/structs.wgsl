@@ -9,6 +9,7 @@ struct Uniforms {
   cursor: u32,           // 当前轮内已采样的像素数 [0, pixel_count)
   sweep: u32,            // 已完成的整轮采样数（= 每个像素的样本数下界）
   pixel_count: u32,      // width * height
+  emission_scale: f32,
 }
 
 struct CameraUniforms {

@@ -345,3 +345,71 @@ canvas:active {
   text-decoration: none;
   font-size: 12px;
 }
+
+.workbench {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  color: #e8eff6;
+  font-size: 13px;
+}
+
+.workbench summary,
+.workbench-panel {
+  border: 1px solid rgba(206, 227, 248, 0.2);
+  border-radius: 8px;
+  background: rgba(15, 21, 29, 0.92);
+  backdrop-filter: blur(8px);
+}
+
+.workbench summary {
+  width: max-content;
+  margin-left: auto;
+  padding: 7px 11px;
+  cursor: pointer;
+}
+
+.workbench-panel {
+  width: min(252px, calc(100vw - 32px));
+  margin-top: 8px;
+  padding: 12px;
+}
+
+.workbench label,
+.workbench input {
+  display: block;
+  width: 100%;
+}
+
+.workbench label {
+  margin-bottom: 12px;
+}
+
+.workbench label span,
+.workbench-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.workbench input {
+  margin: 6px 0 0;
+  accent-color: #90c8ec;
+}
+
+.workbench button {
+  padding: 6px 9px;
+  border: 1px solid #485765;
+  border-radius: 5px;
+  background: #253440;
+  color: inherit;
+  cursor: pointer;
+}
+
+.workbench p {
+  margin: 8px 0 0;
+}
+
+.workbench p:empty {
+  display: none;
+}

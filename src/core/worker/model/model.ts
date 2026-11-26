@@ -59,6 +59,8 @@ export interface Model {
     /** 合并后的三角形，4 × u32（v0,v1,v2, 绝对材质槽位） */
     triangles: GPUBuffer;
     emitters: GPUBuffer;
+    emissionScale(): number;
+    setEmissionScale(scale: number): void;
     /** 实例表：36 floats/instance（blas_node_offset + transform + inv_transform） */
     instanceBuffer: GPUBuffer;
 
@@ -362,6 +364,7 @@ class ModelImpl implements Model {
     public emitters!: GPUBuffer;
     public instanceBuffer!: GPUBuffer;
     private compiled = false;
+    private emissionMultiplier = 1;
     /** 每次成功追加加一；PathTracePass 靠它发现场景 buffer 换过。 */
     private versionCounter = 0;
     /** 已追加的实例（演化后的）；下一次 add 与它们合并后整体重编。 */
@@ -375,6 +378,15 @@ class ModelImpl implements Model {
     constructor(device: GPUDevice) {
         this.device = device;
         this.materialStore = new MaterialStore(device);
+    }
+
+    public emissionScale(): number {
+        return this.emissionMultiplier;
+    }
+
+    public setEmissionScale(scale: number): void {
+        if (!Number.isFinite(Math.fround(scale)) || scale < 0) throw new Error('发光倍率必须是非负有限数');
+        this.emissionMultiplier = Math.fround(scale);
     }
 
     public ready(): boolean {

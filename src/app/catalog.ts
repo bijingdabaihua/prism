@@ -53,6 +53,8 @@ export interface SceneCard {
     tags: string[];
     /** 画廊封面，相对于站点根；缺省时卡片显示占位底纹。文件放 assets/gallery/<key>.png */
     cover?: string;
+    /** 在工作台显示发光亮度控制。 */
+    adjustEmission?: boolean;
     setup: SceneSetup;
     /** 几何清单；按顺序交给 `assemble.ts` 装配。 */
     geometry: SceneGeometry[];
@@ -145,6 +147,7 @@ export const SCENE_CARDS: Readonly<Record<string, SceneCard>> = {
         subtitle: '一块发光面板照亮地面，方块投出柔和的阴影',
         tags: ['自发光材质', '面积光采样', '软阴影'],
         cover: 'gallery/emission-study.png',
+        adjustEmission: true,
         setup: {
             camera: {
                 target: { x: -0.42, y: 0.80, z: 0 },

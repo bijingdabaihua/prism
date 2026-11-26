@@ -2,6 +2,7 @@ import { Prism, PrismUnsupportedError } from '../core/api/prism';
 import { SCENE_CARDS } from './catalog';
 import { loadScene } from './assemble';
 import { OrbitControls } from './orbit-controls';
+import { createWorkbench } from './workbench';
 
 /** 场景编译完之后，再给 Worker 这么久把画面铺满，然后撤 loading。 */
 const LOADING_HOLD_MS = 1500;
@@ -84,12 +85,14 @@ export class RenderView {
             }
 
             // 画面从这一条流里来：Worker 每帧推一张 ImageBitmap，贴上即显示
+            const workbench = createWorkbench(prism, card, canvas, this.key);
             this.stopListening = prism.camera.listen(FRAME_INTERVAL_MS, (bitmap) => {
                 if (!this.context) {
                     bitmap.close();
                     return;
                 }
                 this.context.transferFromImageBitmap(bitmap);
+                if (!workbench.isConnected && !this.disposed) stage.appendChild(workbench);
             });
             this.controls.attach(canvas, prism.camera);
 

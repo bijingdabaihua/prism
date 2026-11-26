@@ -54,6 +54,8 @@ export interface ModelHandle {
      * 一批一次请求：地面铺 9 块砖就是 9 个 Instance，但只编译一次。
      */
     loadInstances(instances: readonly Instance[]): Promise<void>;
+    /** 设置全场景发光几何的辐亮度倍率，默认 1。 */
+    setEmissionScale(scale: number): Promise<void>;
 }
 
 /**
@@ -65,7 +67,8 @@ export interface ModelHandle {
 /** 模型相关的 Worker 消息。 */
 export type ModelRequest =
     | { type: 'model/loadGltf'; id: number; source: Blob; placement?: InstancePlacement }
-    | { type: 'model/loadInstances'; id: number; instances: WireInstance[] };
+    | { type: 'model/loadInstances'; id: number; instances: WireInstance[] }
+    | { type: 'model/setEmissionScale'; id: number; scale: number };
 
 /** 模型句柄需要的最小 RPC 面：一次带返回值的请求。 */
 export interface ModelRpc {
@@ -78,6 +81,10 @@ class RpcModel implements ModelHandle {
 
     public loadGltf(source: Blob, placement?: InstancePlacement): Promise<void> {
         return this.rpc.request<void>((id) => ({ type: 'model/loadGltf', id, source, placement }));
+    }
+
+    public setEmissionScale(scale: number): Promise<void> {
+        return this.rpc.request<void>((id) => ({ type: 'model/setEmissionScale', id, scale }));
     }
 
     public loadInstances(instances: readonly Instance[]): Promise<void> {

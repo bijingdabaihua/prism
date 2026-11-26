@@ -134,6 +134,7 @@ class PathTracePassImpl implements PathTracePass {
     private targetFrameMs = DEFAULT_TARGET_MS;
     /** 下一帧清空累加缓冲并从头开始采样。 */
     private resetPending = false;
+    private lastEmissionScale = 1;
     private readonly context: RenderContext;
     private readonly model: Model;
     private readonly cameraUniform: GPUBuffer;
@@ -224,7 +225,9 @@ class PathTracePassImpl implements PathTracePass {
         if (!bg.hasEnvironment() || !this.model.ready()) return;
 
         // 相机动了 → 清空累加、游标归零（采样预算保留，成本没有变）
-        if (cameraChanged) this.requestReset();
+        const emissionScale = this.model.emissionScale();
+        if (cameraChanged || emissionScale !== this.lastEmissionScale) this.requestReset();
+        this.lastEmissionScale = emissionScale;
 
         // bind group 在四种情况下重建：还没建过、累积纹理被 resize 换成了新视图
         // （两张 ping-pong 是新旧视图各建一次，命中任一即说明整批都过期了）、
@@ -288,6 +291,7 @@ class PathTracePassImpl implements PathTracePass {
         uni[5] = this.cursor;
         uni[6] = this.sweep;
         uni[7] = this.pixelCount;
+        new Float32Array(buf)[8] = emissionScale;
         d.queue.writeBuffer(this.uniformBuf!, 0, buf);
 
         const pass = encoder.beginComputePass();
@@ -340,7 +344,7 @@ class PathTracePassImpl implements PathTracePass {
 
         this.uniformBuf?.destroy();
         this.uniformBuf = d.createBuffer({
-            size: 48, // Uniforms: 8 × u32（resolution 2 + 6 个标量）+ 对齐填充，见 structs.wgsl
+            size: 48, // Uniforms: 8 × u32、1 × f32 和对齐填充，见 structs.wgsl
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
 
