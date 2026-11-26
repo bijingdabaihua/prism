@@ -33,14 +33,14 @@ export interface GltfGeometry {
     placement?: InstancePlacement;
 }
 
-export type SceneGeometry = TiledGroundGeometry | GltfGeometry | { type: 'glass-study' };
+export type SceneGeometry = TiledGroundGeometry | GltfGeometry | { type: 'glass-study' } | { type: 'emission-study' };
 
 /** 渲染器需要、几何之外的场景参数。 */
 export interface SceneSetup {
     /** 构图。换一套机位就是另一张图，所以它是场景的一部分。 */
     camera: CameraView;
     /** 环境图 URL，相对于站点根；渲染页取成 Blob 交给 Worker 解码。 */
-    env: string;
+    env: string | null;
     /** 环境图绕 +y 的旋转（弧度），省略 = 原图方向。 */
     envRotation?: number;
 }
@@ -140,6 +140,25 @@ const VASE_ON_DIRT_GEOMETRY: SceneGeometry[] = [
 ];
 
 export const SCENE_CARDS: Readonly<Record<string, SceneCard>> = {
+    'emission-study': {
+        title: '发光面板',
+        subtitle: '一块发光面板照亮地面，方块投出柔和的阴影',
+        tags: ['自发光材质', '面积光采样', '软阴影'],
+        cover: 'gallery/emission-study.png',
+        setup: {
+            camera: {
+                target: { x: -0.42, y: 0.80, z: 0 },
+                distance: 4.5,
+                theta: 0.88,
+                phi: 1.05,
+                fovY: 0.60,
+                apertureRadius: 0,
+                focusDistance: 0,
+            },
+            env: null,
+        },
+        geometry: [{ type: 'emission-study' }],
+    },
     'glass-study': {
         title: '玻璃球',
         subtitle: '透过玻璃球观察棋盘格的折射，沿球的边缘观察环境反射',

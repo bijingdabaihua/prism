@@ -6,7 +6,7 @@ import type { PBRMaterial } from './material';
  * 这里是唯一把 PBRMaterial 摊平成定长 float、把贴图图集坐标塞进槽位的地方；
  * shader 那边的下标与这里一一对应，改一边必须改另一边。
  *
- * 布局（30 floats / 120 B，槽位下标写在注释里）：
+ * 布局（33 floats / 132 B，槽位下标写在注释里）：
  *   0–2   baseColor            3  metallic
  *   4     roughness            5  normalScale
  *   6     occlusionStrength    7  填充
@@ -14,6 +14,7 @@ import type { PBRMaterial } from './material';
  *   16–19 normal TexRef       20–23 occlusion TexRef
  *   24–27 metallic-roughness TexRef
  *   28    transmission          29 ior
+ *   30–32 emission RGB
  *
  * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
  */
@@ -43,7 +44,7 @@ export interface MaterialTexSlots {
 }
 
 /** 材质在 SSBO 里的定长记录尺寸（float 数），布局见文件头。 */
-export const PBR_MAT_FLOATS = 30;
+export const PBR_MAT_FLOATS = 33;
 
 /** PBRMaterial + 贴图槽位 → GPU 定长记录（PBR_MAT_FLOATS floats）。 */
 export let packPBRMaterial: (m: PBRMaterial, tex?: MaterialTexSlots) => Float32Array;
@@ -93,5 +94,8 @@ packPBRMaterial = (m, tex) => {
         mr[3],
         m.transmission,
         m.ior,
+        m.emission.r,
+        m.emission.g,
+        m.emission.b,
     ]);
 };

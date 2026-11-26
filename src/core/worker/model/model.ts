@@ -58,6 +58,7 @@ export interface Model {
     geometry: GPUBuffer;
     /** 合并后的三角形，4 × u32（v0,v1,v2, 绝对材质槽位） */
     triangles: GPUBuffer;
+    emitters: GPUBuffer;
     /** 实例表：36 floats/instance（blas_node_offset + transform + inv_transform） */
     instanceBuffer: GPUBuffer;
 
@@ -321,10 +322,44 @@ function uploadSceneNodes(device: GPUDevice, data: Float32Array): GPUBuffer {
     return createBuffer(device, data, 'scene-nodes');
 }
 
+/** 每个发光三角形存世界空间顶点、累计面积与发射辐亮度。 */
+function uploadEmitters(device: GPUDevice, instances: readonly Instance[]): GPUBuffer {
+    const records = [0, 0];
+    for (const { mesh, transform: m } of instances) {
+        if (!mesh.materials.some(({ emission: e }) => e.r > 0 || e.g > 0 || e.b > 0)) continue;
+        const vertex = (index: number): [number, number, number] => {
+            const i = index * 12;
+            const [x, y, z] = mesh.vertexData.subarray(i, i + 3);
+            return [
+                m[0] * x + m[4] * y + m[8] * z + m[12],
+                m[1] * x + m[5] * y + m[9] * z + m[13],
+                m[2] * x + m[6] * y + m[10] * z + m[14],
+            ];
+        };
+        const tris = mesh.triangleData;
+        for (let i = 0; i < tris.length; i += 4) {
+            const e = mesh.materials[tris[i + 3]].emission;
+            if (e.r <= 0 && e.g <= 0 && e.b <= 0) continue;
+            const a = vertex(tris[i]);
+            const b = vertex(tris[i + 1]);
+            const c = vertex(tris[i + 2]);
+            const [ux, uy, uz] = b.map((v, axis) => v - a[axis]);
+            const [vx, vy, vz] = c.map((v, axis) => v - a[axis]);
+            const area = 0.5 * Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
+            if (!(area > 0)) continue;
+            records[0]++;
+            records[1] += area;
+            records.push(...a, ...b, ...c, records[1], e.r, e.g, e.b);
+        }
+    }
+    return createBuffer(device, new Float32Array(records), 'scene-emitters');
+}
+
 class ModelImpl implements Model {
     public nodes!: GPUBuffer;
     public geometry!: GPUBuffer;
     public triangles!: GPUBuffer;
+    public emitters!: GPUBuffer;
     public instanceBuffer!: GPUBuffer;
     private compiled = false;
     /** 每次成功追加加一；PathTracePass 靠它发现场景 buffer 换过。 */
@@ -372,13 +407,14 @@ class ModelImpl implements Model {
         }
 
         const retired: GPUBuffer[] = [];
-        if (this.compiled) retired.push(this.nodes, this.geometry, this.triangles, this.instanceBuffer);
+        if (this.compiled) retired.push(this.nodes, this.geometry, this.triangles, this.instanceBuffer, this.emitters);
         if (previousMaterials) retired.push(previousMaterials);
 
         this.instances = instances;
         this.nodes = compiled.nodes;
         this.geometry = compiled.geometry;
         this.triangles = compiled.triangles;
+        this.emitters = compiled.emitters;
         this.instanceBuffer = compiled.instanceBuffer;
         this.compiled = true;
         this.versionCounter++;
@@ -399,6 +435,7 @@ class ModelImpl implements Model {
         this.nodes?.destroy();
         this.geometry?.destroy();
         this.triangles?.destroy();
+        this.emitters?.destroy();
         this.instanceBuffer?.destroy();
         for (const buf of this.retired) buf.destroy();
         this.retired.clear();
@@ -437,6 +474,8 @@ class ModelImpl implements Model {
                 nodes: track(uploadSceneNodes(d, nodes.data)),
                 geometry: track(uploadGeometry(d, offsets)),
                 triangles: track(uploadTriangles(d, offsets, matSlots)),
+                emitters: track(uploadEmitters(d, insts)),
+
                 instanceBuffer: track(uploadInstances(d, insts, offsets, nodes.blasBase)),
             };
         } catch (err) {
@@ -453,6 +492,7 @@ interface CompiledBuffers {
     nodes: GPUBuffer;
     geometry: GPUBuffer;
     triangles: GPUBuffer;
+    emitters: GPUBuffer;
     instanceBuffer: GPUBuffer;
 }
 
@@ -461,5 +501,6 @@ function destroyCompiled(buffers: CompiledBuffers): void {
     buffers.nodes.destroy();
     buffers.geometry.destroy();
     buffers.triangles.destroy();
+    buffers.emitters.destroy();
     buffers.instanceBuffer.destroy();
 }

@@ -342,6 +342,7 @@ function meshFingerprint(mesh: WireMesh): string {
                 m.roughness,
                 m.transmission,
                 m.ior,
+                m.emission,
                 m.normalScale,
                 m.occlusionStrength,
                 m.displacementMid,
@@ -475,6 +476,8 @@ interface GltfTextureRef {
 }
 
 interface GltfMaterial {
+    emissiveFactor?: number[];
+    extensions?: { KHR_materials_emissive_strength?: { emissiveStrength?: number } };
     name?: string;
     normalTexture?: GltfTextureRef;
     occlusionTexture?: GltfTextureRef;
@@ -1381,7 +1384,10 @@ function occlusionUrl(ctx: LoadContext, index: number): Promise<string | null> {
 async function convertMaterial(gm: GltfMaterial, ctx: LoadContext): Promise<PBRMaterial> {
     const pbr = gm.pbrMetallicRoughness ?? {};
     const [r, g, b, a] = pbr.baseColorFactor ?? [1, 1, 1, 1];
+    const [er, eg, eb] = gm.emissiveFactor ?? [0, 0, 0];
+    const strength = gm.extensions?.KHR_materials_emissive_strength?.emissiveStrength ?? 1;
     const options: PBRMaterialOptions = {
+        emission: { r: er * strength, g: eg * strength, b: eb * strength, a: 1 },
         baseColor: { r, g, b, a },
         metallic: pbr.metallicFactor ?? 1,
         roughness: pbr.roughnessFactor ?? 1,

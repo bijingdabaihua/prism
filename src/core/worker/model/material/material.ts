@@ -49,6 +49,8 @@ export interface PBRMaterial {
     readonly transmission: number;
     /** 电介质相对于空气的折射率。 */
     readonly ior: number;
+    /** 线性 RGB 发射辐亮度，允许大于 1。 */
+    readonly emission: Color;
     readonly baseColorTexture?: Image;
     /**
      * glTF 的 metallic-roughness 打包图：G = 粗糙度，B = 金属度，R = 环境光遮蔽。
@@ -116,6 +118,7 @@ export interface PBRMaterialOptions {
     roughness?: number;
     transmission?: number;
     ior?: number;
+    emission?: Color;
     baseColorTexture?: Image;
     metallicRoughnessTexture?: Image;
     roughnessTexture?: Image;
@@ -707,6 +710,7 @@ class PBRMaterialImpl implements PBRMaterial {
     public readonly roughness: number;
     public readonly transmission: number;
     public readonly ior: number;
+    public readonly emission: Color;
     public readonly baseColorTexture?: Image;
     public readonly metallicRoughnessTexture?: Image;
     public readonly roughnessTexture?: Image;
@@ -719,6 +723,7 @@ class PBRMaterialImpl implements PBRMaterial {
     public readonly displacementScale?: number;
 
     constructor(options: PBRMaterialOptions = {}) {
+        this.emission = options.emission ?? { r: 0, g: 0, b: 0, a: 1 };
         this.baseColor = options.baseColor ?? { r: 0.85, g: 0.85, b: 0.85, a: 1 };
         this.metallic = options.metallic ?? 0;
         this.roughness = options.roughness ?? 0.5;
@@ -744,6 +749,7 @@ class PBRMaterialImpl implements PBRMaterial {
             roughness: this.roughness,
             transmission: this.transmission,
             ior: this.ior,
+            emission: this.emission,
             baseColorTexture: atScale(this.baseColorTexture),
             metallicRoughnessTexture: atScale(this.metallicRoughnessTexture),
             roughnessTexture: atScale(this.roughnessTexture),

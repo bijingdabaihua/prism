@@ -353,6 +353,7 @@ class PathTracePassImpl implements PathTracePass {
                 { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
                 { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
                 { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 20, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
                 { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
                 {
                     binding: 8,
@@ -471,6 +472,7 @@ class PathTracePassImpl implements PathTracePass {
                 { binding: 4, resource: { buffer: model.geometry } },
                 { binding: 5, resource: { buffer: model.triangles } },
                 { binding: 6, resource: { buffer: model.materialBuffer() } },
+                { binding: 20, resource: { buffer: model.emitters } },
                 { binding: 7, resource: { buffer: model.instanceBuffer } },
                 { binding: 8, resource: writeView },
                 { binding: 9, resource: bg.envMapView() },

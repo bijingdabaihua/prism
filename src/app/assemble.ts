@@ -1,5 +1,6 @@
 import type { ModelHandle, Prism } from '../core/api/prism';
 import type { SceneCard, SceneGeometry } from './catalog';
+import { buildEmissionStudy } from './emission-study';
 import { buildGlassStudy } from './glass-study';
 import { buildTiledGround } from './ground';
 
@@ -18,8 +19,13 @@ export async function loadScene(prism: Prism, card: SceneCard): Promise<void> {
 
     // 环境图以 Blob 交给 Worker：主线程只取字节，解码仍留在 Worker。
     // setImage 从原图方向建好；场景需要别的朝向时再由 setRotation 转。
-    await prism.background.setImage(await fetchBlob(card.setup.env));
-    await prism.background.setRotation(card.setup.envRotation ?? 0);
+    if (card.setup.env === null) {
+        const blackHdr = new Blob(['#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 2\n', new Uint8Array(8)]);
+        await prism.background.setImage(blackHdr);
+    } else {
+        await prism.background.setImage(await fetchBlob(card.setup.env));
+        await prism.background.setRotation(card.setup.envRotation ?? 0);
+    }
 
     await loadGeometry(prism.model, card.geometry);
 }
@@ -34,6 +40,8 @@ async function loadGeometry(model: ModelHandle, geometry: readonly SceneGeometry
         if (object.type === 'tiled-ground') {
             const material = await fetchBlob(object.material);
             await model.loadInstances(await buildTiledGround(material, object));
+        } else if (object.type === 'emission-study') {
+            await model.loadInstances(buildEmissionStudy());
         } else if (object.type === 'glass-study') {
             await model.loadInstances(buildGlassStudy());
         } else {

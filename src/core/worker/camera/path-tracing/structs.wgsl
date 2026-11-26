@@ -42,6 +42,7 @@ const epsilon = 1e-6;
 @group(0) @binding(4) var<storage, read> geometry: array<f32>;
 @group(0) @binding(5) var<storage, read> triangles: array<u32>;
 @group(0) @binding(6) var<storage, read> materials: array<f32>;
+@group(0) @binding(20) var<storage, read> emitters: array<f32>;
 @group(0) @binding(7) var<storage, read> instances: array<Instance>;
 @group(0) @binding(8) var out_texture: texture_storage_2d<rgba32float, write>;
 @group(0) @binding(9) var environment_texture: texture_2d<f32>;

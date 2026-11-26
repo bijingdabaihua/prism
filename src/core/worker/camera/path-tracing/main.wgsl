@@ -105,7 +105,7 @@ fn scatter_glass(hit: SurfaceInfo, sample: f32) -> Scatter {
   if (!next_hit.hit) {
     return Scatter(weight * env_radiance(direction), vec3(0.0), false, next_hit);
   }
-  return Scatter(vec3(0.0), weight, true, next_hit);
+  return Scatter(weight * next_hit.emission, weight, true, next_hit);
 }
 
 fn scatter(hit: SurfaceInfo, seed: u32, dim: ptr<function, u32>) -> Scatter {
@@ -141,7 +141,12 @@ fn scatter(hit: SurfaceInfo, seed: u32, dim: ptr<function, u32>) -> Scatter {
     // 天空可见度）。太阳的 NEE 项不在这里，仍在 direct_light 里原样保留。
     return Scatter(mis_w * weight * env * hit.ao, vec3(0.0), false, next_hit);
   }
-  return Scatter(vec3(0.0), weight, true, next_hit);
+  var emitted = vec3(0.0);
+  if (any(next_hit.emission > vec3(0.0))) {
+    let pdf_light = emitter_pdf(hit.position, next_hit.position, next_hit.geo_normal);
+    emitted = next_hit.emission * weight * mis_weight(bsdf.pdf, pdf_light);
+  }
+  return Scatter(emitted, weight, true, next_hit);
 }
 
 
@@ -165,6 +170,7 @@ fn path_trace(ray: Ray, seed: u32, dim: ptr<function, u32>) -> vec3<f32> {
   var beta = vec3(1.0);
   var L = vec3(0.0);
   var hit = intersect_surface(ray);
+  L += hit.emission;
 
   for (var bounce: u32 = 0u; bounce <= u.max_bounces; bounce++) {
     // Zero-bounce radiance: a ray escaping into the environment contributes its
@@ -176,7 +182,8 @@ fn path_trace(ray: Ray, seed: u32, dim: ptr<function, u32>) -> vec3<f32> {
 
     // NEE estimator
     if (hit.transmission < 1.0) {
-      L += beta * (1.0 - hit.transmission) * direct_environment(hit, seed, dim);
+      let direct = direct_environment(hit, seed, dim) + direct_emitter(hit, seed, dim);
+      L += beta * (1.0 - hit.transmission) * direct;
     }
 
     // BSDF estimator

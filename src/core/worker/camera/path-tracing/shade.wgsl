@@ -43,6 +43,7 @@ struct SurfaceInfo {
   transmission: f32,
   eta: f32,
   smooth_normal: vec3<f32>,
+  emission: vec3<f32>,
 }
 
 // Evaluate material at a hit point — no lighting, used by bounce loop
@@ -56,11 +57,11 @@ fn material_slot(global_triangle_index: u32) -> u32 {
 fn compute_surface(ray: Ray, hit: BVHResult) -> SurfaceInfo {
   // Miss — no geometry at all; store ray direction in wo for env map sampling
   if (hit.t <= 0.0) {
-    return SurfaceInfo(vec3(0.0), vec3(0.0), vec3(0.0), -ray.direction, vec3(0.0), 0.0, 0.0, 1.0, false, 0.0, 1.0, vec3(0.0));
+    return SurfaceInfo(vec3(0.0), vec3(0.0), vec3(0.0), -ray.direction, vec3(0.0), 0.0, 0.0, 1.0, false, 0.0, 1.0, vec3(0.0), vec3(0.0));
   }
 
   let inst = instances[hit.instance_index];
-  let o = material_slot(u32(hit.triangle_index)) * 30u;
+  let o = material_slot(u32(hit.triangle_index)) * 33u;
 
   var base_color = vec3(materials[o+0u], materials[o+1u], materials[o+2u]);
   // metallic / roughness 是 glTF 的 factor：有贴图时它们当乘数，没有时就是全部。
@@ -181,6 +182,7 @@ fn compute_surface(ray: Ray, hit: BVHResult) -> SurfaceInfo {
     materials[o + 28u] * (1.0 - clamp(metallic, 0.0, 1.0)),
     select(materials[o + 29u], 1.0 / materials[o + 29u], entering),
     facing_normal,
+    vec3(materials[o + 30u], materials[o + 31u], materials[o + 32u]),
   );
 }
 
@@ -398,6 +400,50 @@ fn direct_environment(surf: SurfaceInfo, seed: u32, dim: ptr<function, u32>) -> 
   let radiance = env_texel(sample.direction);
 
   return mis_w * bsdf_val.f * radiance * cos_surf / max(sample.pdf, 1e-12);
+}
+
+// 面积采样转换成立体角 PDF，与 BSDF 采样使用同一测度。
+fn emitter_pdf(origin: vec3<f32>, point: vec3<f32>, normal: vec3<f32>) -> f32 {
+  let delta = point - origin;
+  let distance_squared = dot(delta, delta);
+  let cosine = abs(dot(normalize(delta), normal));
+  return distance_squared / max(emitters[1] * cosine, 1e-12);
+}
+
+fn direct_emitter(surf: SurfaceInfo, seed: u32, dim: ptr<function, u32>) -> vec3<f32> {
+  let count = u32(emitters[0]);
+  if (count == 0u) { return vec3(0.0); }
+  let area = lds(seed, u.frame_index, *dim) * emitters[1]; *dim += 1u;
+  let r1 = lds(seed, u.frame_index, *dim); *dim += 1u;
+  let r2 = lds(seed, u.frame_index, *dim); *dim += 1u;
+  var lo = 0u;
+  var hi = count - 1u;
+  while (lo < hi) {
+    let mid = (lo + hi) / 2u;
+    if (area < emitters[2u + mid * 13u + 9u]) { hi = mid; }
+    else { lo = mid + 1u; }
+  }
+  let i = 2u + lo * 13u;
+  let a = vec3(emitters[i], emitters[i + 1u], emitters[i + 2u]);
+  let b = vec3(emitters[i + 3u], emitters[i + 4u], emitters[i + 5u]);
+  let c = vec3(emitters[i + 6u], emitters[i + 7u], emitters[i + 8u]);
+  let r = sqrt(r1);
+  let point = (1.0 - r) * a + r * (1.0 - r2) * b + r * r2 * c;
+  let delta = point - surf.position;
+  if (dot(delta, delta) < 1e-10) { return vec3(0.0); }
+  let wi = normalize(delta);
+  let cosine = dot(surf.normal, wi);
+  if (cosine <= 0.0 || dot(surf.geo_normal, wi) <= 0.0) { return vec3(0.0); }
+
+  let origin = surf.position + surf.geo_normal * SHADOW_EPSILON;
+  let to_light = point - origin;
+  let blocker = intersect_scene(Ray(origin, normalize(to_light)));
+  if (blocker.t > 0.0 && blocker.t < length(to_light) - SHADOW_EPSILON) { return vec3(0.0); }
+
+  let pdf = emitter_pdf(surf.position, point, normalize(cross(b - a, c - a)));
+  let bsdf = evaluate_bsdf(-wi, surf.wo, surf.normal, surf.metallic, surf.roughness, surf.albedo);
+  let emission = vec3(emitters[i + 10u], emitters[i + 11u], emitters[i + 12u]);
+  return bsdf.f * emission * cosine * mis_weight(pdf, bsdf.pdf) / max(pdf, 1e-12);
 }
 
 // Environment / atlas samplers (used by the bounce loop)
