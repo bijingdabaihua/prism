@@ -6,6 +6,7 @@
 - 在线 demo：https://bijingdabaihua.github.io/prism/
 - 技术栈：TypeScript、WGSL、WebGPU、Web Workers、Vite、glTF 2.0、EXR
 - 资产：Poly Haven（CC0），新增资产保持同样的许可
+
 ## 当前阶段与优先级（8 周，从 2026 年 12 月起）
 
 这个项目首先是求职作品。判断一个改动值不值得做，看它能否在**效果、速度（要有数字）、可用性**里至少提升一项。
@@ -35,7 +36,6 @@ src/
 - **`src/core/worker/worker.ts` 装配渲染模块**；场景清单保留在 app 层，不要让 core 依赖 app。
 - **新能力一律走命令**：在 `prism.ts` 门面和消息协议上加带类型的命令。UI 和 AI 用同一套命令，不给任何一方开后门。
 - **不引入** three.js，也不引入第三方 BVH 或渲染库。
-- 代码风格以 `CODE_STYLE.md` 为准，格式化用 Prettier。
 
 ## 渲染现状（改渲染代码前先读）
 
@@ -61,7 +61,114 @@ src/
 ## 待决问题
 
 - [ ] 玻璃和自发光先做哪个（倾向先做玻璃）
-- [ ] 场景从代码 builder 改成 JSON 描述的重构是否确认
+- [ ] 是否将现有 TypeScript 场景清单迁移为 JSON 文件
 - [ ] AI 接入方式：MCP + WebSocket 连接页面，还是用无头浏览器跑渲染
 - [ ] Wasteland 场景收敛到可展示需要多少秒（用来定验收数字）
 - [ ] 工作台做成画廊里的一个入口，还是单独一个页面
+
+## 代码规范
+
+Prism 项目 TypeScript / WGSL 代码规范。所有 AI 生成的代码必须遵守。
+
+### TypeScript
+
+#### 文件结构：两层划分
+
+每个模块文件固定分两层，层间用分隔线隔开：
+
+```typescript
+// ═══════════════════════ 契约层（导出） ═══════════════════════
+
+/** 构造入口：只有声明（类型 + 文档），不含实现 */
+export let createXxx: (deps: XxxDeps) => XxxHandle;
+
+export interface XxxHandle { ... }      // 对外契约
+export interface XxxDeps { ... }        // 依赖面
+export type XxxRequest = ...;           // 被框架引用的形状（如消息报文）
+
+// ═══════════════════════ 实现层（不导出） ═══════════════════════
+
+class XxxImpl implements XxxHandle { ... }   // 私有类、私有类型
+
+createXxx = (deps) => new XxxImpl(deps);     // 契约层变量的赋值
+```
+
+- **契约层 = 全部导出。** 它是模块的全部承诺：读完这一层即可掌握整个模块，
+  不需要读实现层。
+  - 值：只出现「类型 + 文档」的声明，**不含任何实现**（连一行委托也不行）；
+  - 类型：对外契约、依赖面、被框架引用的形状（如消息报文）。
+- **实现层 = 全部不导出。** 它是模块的全部细节：私有类、私有类型，以及
+  契约层变量的赋值语句。契约不变，本层可任意重构。
+- 一个符号归哪层只看一条：**它导出吗**。导出就契约层，不导出就实现层，
+  没有例外。
+- 引用方向：实现层可以引用契约层；契约层不得引用实现层的任何符号。
+- 导出值的标准形态是 `export let` + 实现层赋值。对外只读由 ESM 保证
+  （import 绑定不可重新赋值）；模块内不重新赋值契约层变量，靠约定遵守。
+  不用 `const` 的原因：`const` 必须在声明处初始化，而初始化式就是实现，
+  与「契约层零实现」互斥。
+- 参考样例：`src/core/api/background.ts`。
+
+**以导出类为主体的模块**（如 IR 数据类）：类不直接导出，同样拆两层——
+
+- 契约层：`export interface Xxx`（全部字段 + 方法签名，文档只写在这里）+
+  `export let Xxx`（类绑定，只写构造签名和静态方法签名，无实现）+ 其余导出类型；
+- 实现层：`class XxxImpl implements Xxx`（字段不带文档，与 interface 的一致性
+  由 `implements` 在编译期强制）+ 底部 `Xxx = XxxImpl` 赋值；
+- interface 与类绑定同名共存（类型空间 + 值空间），调用方的 `new Xxx()`、
+  `Xxx.static()`、`: Xxx` 写法全部不变；
+- 参考样例：`src/core/worker/model/material/material.ts`。
+
+#### 导入
+
+- 项目内全部用相对路径
+- type-only import 放最前面
+
+#### 类设计
+
+- 所有成员显式标注 `public` / `private`，不允许省略
+- 禁止 getter/setter，全部用普通方法（`width()` 而非 `get width()`）
+
+#### 类成员顺序
+
+越开放越靠前，严格按以下顺序排列：
+
+```
+public static
+public 属性
+public readonly
+private 属性
+private readonly
+constructor
+public 方法
+private 方法
+```
+
+**属性区规则：**
+- 属性之间不允许空行
+- 不同可见性分组（public / public readonly / private / private readonly）之间也不允许空行
+- 整个属性区从上到下是连续的，中间不插入空行
+
+**方法区规则：**
+- 方法体必须展开换行，即使只有一行 return 也不允许单行写法
+  ```typescript
+  // ❌ 错误
+  public width(): number { return this.w; }
+
+  // ✅ 正确
+  public width(): number {
+    return this.w;
+  }
+  ```
+- 方法之间必须有空行分隔
+
+#### 注释
+
+- 只在关键逻辑处写简短注释
+- 层分隔线使用「文件结构」规定的格式；除此之外仍禁止装饰性分隔线、ASCII 结构框
+- 禁止重复代码已表达内容的注释
+- 改完自查
+
+### WGSL
+
+- 变量/函数名使用 `snake_case`
+- 结构体名使用 `PascalCase`

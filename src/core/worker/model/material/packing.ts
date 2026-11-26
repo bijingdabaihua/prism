@@ -14,7 +14,7 @@ import type { PBRMaterial } from './material';
  *   16–19 normal TexRef       20–23 occlusion TexRef
  *   24–27 metallic-roughness TexRef
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 CODE_STYLE.md。
+ * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
  */
 
 // ══════════════════════════ 契约层（导出） ══════════════════════════

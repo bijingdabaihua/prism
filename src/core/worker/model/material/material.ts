@@ -11,7 +11,7 @@ import { contentCacheId, isAbsoluteUri, parseZip, readZipEntry, resolveZipPath, 
  * 实现层，由 `buildByBlend` 驱动。映射是有损的，损失多少由各导入器自己说明。
  * GPU 打包在 engine/model/material/packing.ts。
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 CODE_STYLE.md。
+ * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
  */
 
 // ══════════════════════════ 契约层（导出） ══════════════════════════

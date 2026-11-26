@@ -3,7 +3,6 @@
     "target": "ES2021",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "baseUrl": ".",
     "lib": ["ES2021", "DOM"],
     "types": ["@webgpu/types"],
     "strict": true,
@@ -17,6 +16,5 @@
     "verbatimModuleSyntax": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist", "**/*.test.ts"]
+  "include": ["src/**/*.ts"]
 }
