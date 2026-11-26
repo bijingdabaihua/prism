@@ -1,4 +1,5 @@
 import { srgbToLinear } from '../../math/color';
+import { decodeExr } from './exr';
 import type { TextureKind } from './material/material';
 
 /**
@@ -133,47 +134,12 @@ function sniff(buf: ArrayBuffer): 'exr' | 'hdr' | 'bitmap' {
 async function decodeImage(buf: ArrayBuffer, options?: ImageOptions): Promise<Image> {
     switch (sniff(buf)) {
         case 'exr':
-            return decodeExr(buf);
+            return { ...(await decodeExr(buf)), layout: 'equirect' };
         case 'hdr':
             return decodeHdr(buf);
         default:
             return decodeBitmap(buf, options?.srgb ?? true);
     }
-}
-
-// OpenEXR —— 用 three 的解码器，约定输出 Float32 RGBA
-
-async function decodeExr(buf: ArrayBuffer): Promise<Image> {
-    const [{ EXRLoader }, { FloatType }] = await Promise.all([
-        import('three/examples/jsm/loaders/EXRLoader.js'),
-        import('three'),
-    ]);
-
-    const loader = new EXRLoader();
-    loader.setDataType(FloatType as never);
-
-    const objectUrl = URL.createObjectURL(new Blob([buf]));
-    let texture: { image: { width: number; height: number; data: Float32Array }; dispose(): void };
-    try {
-        texture = await new Promise((resolve, reject) => {
-            loader.load(objectUrl, resolve as never, undefined, reject);
-        });
-    } finally {
-        URL.revokeObjectURL(objectUrl);
-    }
-
-    const { width, height, data } = texture.image;
-    texture.dispose();
-
-    // three 可能给 RGB 也可能给 RGBA，按实际长度判通道数
-    const channels = data.length / (width * height);
-    const rgb = new Float32Array(width * height * 3);
-    for (let i = 0; i < width * height; i++) {
-        rgb[i * 3] = data[i * channels];
-        rgb[i * 3 + 1] = data[i * channels + 1];
-        rgb[i * 3 + 2] = data[i * channels + 2];
-    }
-    return { width, height, data: rgb, layout: 'equirect' };
 }
 
 // Radiance HDR (.hdr) —— RGBE / 新式扫描线 RLE

@@ -1,7 +1,7 @@
 # Prism
 
-一个从零写的 WebGPU 路径追踪器。没有 three.js 的渲染管线，没有第三方 BVH，
-也没有预渲染的图 —— 页面上每一张图都是浏览器里现算出来的。
+一个从零写的 WebGPU 路径追踪器。不依赖 three.js 或第三方 BVH。
+渲染页的画面由浏览器实时计算；画廊封面是静态预览图。
 
 ![荒地](assets/gallery/vase-on-dirt.png)
 
@@ -12,7 +12,7 @@
 
 | | |
 |---|---|
-| **荒地** | 一只青花瓷罐搁在夕阳下的砂土上，右下角躺着一根枯枝。地面铺到 72 m 外 —— 地表的起伏是真几何，每一颗石子都参与求交和阴影，不是法线贴图贴出来的假凹凸；景深是薄透镜算的，光圈半径按毫米给。 |
+| **荒地** | 一只青花瓷罐搁在夕阳下的砂土上，右下角躺着一根枯枝。地面由 3 × 3 块带位移的地砖拼成，覆盖约 6.33 m 见方；地表起伏是真几何，会参与求交和阴影。当前场景暂时关闭景深，以降低焦外噪点。 |
 
 渲染页左上角返回画廊。渲染跑在 Worker 里，主线程只负责显示；左键拖拽旋转、
 滚轮缩放、右键拖拽平移。
@@ -41,11 +41,11 @@ Firefox 需要 `dom.webgpu.enabled`。不支持时会落到静态页 —— 渲�
 - 渐进累积：每帧累加 1 spp，相机和参数不动就不重置
 
 **其它**
-- 环境图重要性采样（2K EXR）
+- 环境图重要性采样（2K EXR）；项目内解码器支持单部分 scanline EXR 的未压缩、ZIPS、ZIP 格式及 half / float RGB 通道
 - glTF 2.0 导入（`.gltf` 外链资源、`.glb` 单文件都行），
   画面里那只瓷罐和枯枝就是这么进来的
 - 薄透镜景深：光圈半径 + 对焦距离，都是米；主射线从光瞳圆盘上一点出发，
-  指向焦平面上的同一个点
+  指向焦平面上的同一个点；当前场景暂时关闭这一效果
 - 位移贴图烘成真几何（细分 + 顶点位移），进 BVH 参与求交和阴影；演化后的材质
   不带位移字段，着色器不知道它存在
 - 材质贴图走 `texture_2d_array`：漫反射 / 法线 / 粗糙度 / 环境光遮蔽四个数组，
@@ -72,43 +72,34 @@ Firefox 需要 `dom.webgpu.enabled`。不支持时会落到静态页 —— 渲�
 依赖方向单向，越往下越不认识上面的东西：
 
 ```
-app/     业务层：路由、画廊、渲染页、降级页 + scenes/ 场景内容
-         —— 主线程只 import core/prism 与 scenes/catalog
-core/    渲染器：门面 + Worker 组合根 + 引擎 + IR 生产 + IR
-         prism.ts（门面 + 主线程 RPC + 消息协议 + 错误）
-         camera.ts / background.ts / model.ts（主线程句柄：契约 + 实现）
-         worker.ts（Worker 组合根）
-         engine/     context / camera / frame（含 path-tracing）/ loop /
-                     background（envMap + 亮度 CDF）/ display / model
-         ir/         Image（含图像 / 贴图解码）/ PBRMaterial /
-                     blend（.blend 材质导入）/ Mesh（含 MeshBuilder）/
-                     Instance（含 glTF 解析与摆位）/ Scene / CameraView
-math/    向量、矩阵、颜色（app 与 core 共用）
+src/app/               路由、画廊、渲染页、降级页、场景清单和装配
+src/core/api/          Prism 门面、主线程 RPC 和三个句柄
+src/core/worker/       Worker 入口及渲染实现
+  camera/              帧循环、路径追踪、显示
+  background/          环境图和亮度 CDF
+  model/               glTF、材质、图像解码、网格和 BVH
+src/core/math/         向量、矩阵、颜色
 ```
 
 光追完全跑在 Worker 里：`Prism.create()` 起一个 Worker、要一个独立 `GPUDevice`，
-主线程不碰 GPU，只通过 `camera.listen()` 接收 `ImageBitmap`。`core/worker.ts` 是
-组合根：唯一同时 import 引擎和场景清单的地方。IR 与编译产物分离：`ir/`
-下的 `instance.ts` / `mesh.ts` 是场景描述，`model/model.ts` 里的 buffer 是编译结果。
+主线程不碰 GPU，只通过 `camera.listen()` 接收 `ImageBitmap`。`src/core/worker/worker.ts`
+负责装配相机、背景和模型；场景定义与加载顺序留在 app 层。
 
 约 8800 行 TypeScript + WGSL + CSS。
 
 ### 加一个场景
 
-`app/scenes/manifest.ts` 是唯一清单：写一个 `createXxx(): Promise<Scene>` 构建器
-（`app/scenes/` 里单独一个文件），在 `SCENES` 里加一条，在 `catalog.ts` 里
-加卡片元数据，再放一张 `assets/gallery/<key>.png` 当封面。
+在 `src/app/catalog.ts` 的 `SCENE_CARDS` 中添加机位、环境图、几何清单和卡片信息；
+按需扩展 `src/app/assemble.ts` 中的装配逻辑，再放一张 `assets/gallery/<key>.png` 当封面。
 路由、画廊、降级页都会自动带上它。
 
 ## 场景从哪来
 
 模型、贴图、环境图都来自 **Poly Haven**（CC0）：模型和材质下载后放进
 `assets/model/`、`assets/textures/`，环境图（EXR）放进 `assets/env/`。
-有些场景是几个模型拼起来的，摆放和取景写在 `app/scenes/` 里 ——
-引擎不认识具体的模型，只认 `Scene`。
+模型摆放和取景写在 `src/app/catalog.ts`；渲染器不认识具体场景。
 
-地面这类大面积几何由代码生成 —— `core/ir/mesh.ts` 里的 `MeshBuilder`
-铺平面，位移贴图挂在材质上：`Mesh.evolve()` 在编译时把带图的三角形细分成真几何、
+地面这类大面积几何由 `src/app/ground.ts` 生成；位移贴图挂在材质上，网格在编译时细分成真几何，
 顶点抬起、法线按高度场重算，那张图进 GPU 之前就被消耗掉了。
 
 ## 许可

@@ -143,7 +143,7 @@ export const SCENE_CARDS: Readonly<Record<string, SceneCard>> = {
     'vase-on-dirt': {
         title: '荒地',
         subtitle: '青花瓷罐搁在夕阳下的砂土上，一片平地铺到画外，只剩土和光',
-        tags: ['实例化地表', '薄透镜景深', 'glTF 资产'],
+        tags: ['实例化地表', '位移几何', 'glTF 资产'],
         cover: 'gallery/vase-on-dirt.png',
         setup: {
             camera: VASE_CAMERA,
