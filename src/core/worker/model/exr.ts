@@ -1,4 +1,4 @@
-/** RGB half / float 扫描行 EXR 解码器；支持未压缩、ZIPS 和 ZIP。 */
+/** RGB 或灰度 half / float 扫描行 EXR 解码器；支持未压缩、ZIPS 和 ZIP。 */
 
 export let decodeExr: (buffer: ArrayBuffer) => Promise<{ width: number; height: number; data: Float32Array }>;
 
@@ -87,8 +87,9 @@ decodeExr = async (buffer) => {
     if (imageType && imageType !== 'scanlineimage') throw new Error(`不支持的 EXR 图像类型 ${imageType}`);
     if (lineOrder !== 0 && lineOrder !== 1 && lineOrder !== 2) throw new Error('EXR 扫描行顺序无效');
     if (![0, 2, 3].includes(compression)) throw new Error(`不支持的 EXR 压缩类型 ${compression}`);
-    if (!['R', 'G', 'B'].every((name) => channels.some((channel) => channel.name === name))) {
-        throw new Error('EXR 缺少 RGB 通道');
+    const grayscale = channels.length === 1 && channels[0].name === 'Y';
+    if (!grayscale && !['R', 'G', 'B'].every((name) => channels.some((channel) => channel.name === name))) {
+        throw new Error('EXR 缺少 RGB 或灰度 Y 通道');
     }
 
     const linesPerBlock = compression === 3 ? 16 : 1;
@@ -130,14 +131,19 @@ decodeExr = async (buffer) => {
         for (let line = 0; line < lines; line++) {
             let channelOffset = line * stride;
             for (const channel of channels) {
-                const component = { R: 0, G: 1, B: 2 }[channel.name as 'R' | 'G' | 'B'];
-                if (component !== undefined) {
+                const component = grayscale ? 0 : ['R', 'G', 'B'].indexOf(channel.name);
+                if (component >= 0) {
                     for (let x = 0; x < width; x++) {
                         const sampleOffset = channelOffset + x * channel.bytes;
                         const value = channel.type === 2
                             ? block.getFloat32(sampleOffset, true)
                             : halfToFloat(block.getUint16(sampleOffset, true));
-                        data[((height - 1 - row - line) * width + x) * 3 + component] = value;
+                        const pixel = ((height - 1 - row - line) * width + x) * 3;
+                        data[pixel + component] = value;
+                        if (grayscale) {
+                            data[pixel + 1] = value;
+                            data[pixel + 2] = value;
+                        }
                     }
                 }
                 channelOffset += width * channel.bytes;
