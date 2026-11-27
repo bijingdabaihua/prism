@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-/** 发光场景允许 Agent 执行的命令。null 表示无法执行。 */
+/** The command the Agent may execute for the emission scene. null means it cannot be executed. */
 export function readEmissionCommand(value: unknown): number | null {
     if (typeof value !== 'object' || value === null || !('operation' in value) || !('scale' in value)) return null;
     const { operation, scale } = value;
@@ -10,7 +10,7 @@ export function readEmissionCommand(value: unknown): number | null {
 
 export async function requestEmissionCommand(prompt: string, current: number, signal: AbortSignal): Promise<number | null> {
     const key = import.meta.env.VITE_PUBLIC_DEEPSEEK_API_KEY?.trim();
-    if (!key) throw new Error('AI 演示尚未配置');
+    if (!key) throw new Error('AI demo is not configured');
 
     const response = await fetch('https://api.deepseek.com/chat/completions', {
         method: 'POST',
@@ -29,8 +29,8 @@ export async function requestEmissionCommand(prompt: string, current: number, si
             ],
         }),
     });
-    if (response.status === 402 || response.status === 429) throw new Error('AI 演示额度暂不可用');
-    if (!response.ok) throw new Error('AI 请求失败，请稍后再试');
+    if (response.status === 402 || response.status === 429) throw new Error('AI demo quota is temporarily unavailable');
+    if (!response.ok) throw new Error('AI request failed, please try again later');
     const data = await response.json();
     const content = data.choices?.[0]?.message?.content;
     if (typeof content !== 'string') return null;

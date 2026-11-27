@@ -32,7 +32,7 @@ export function length(v: Vec3): number {
     return Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
 }
 
-/** 零长度输入返回零向量，不产生 NaN。 */
+/** Zero-length input returns the zero vector and never produces NaN. */
 export function normalize(v: Vec3): Vec3 {
     const len = length(v);
     if (len < 1e-12) return { x: 0, y: 0, z: 0 };

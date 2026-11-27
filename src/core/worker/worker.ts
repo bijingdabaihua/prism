@@ -1,25 +1,34 @@
 /**
- * 光追 Worker —— 一个 Prism 实例一个，独占一个 GPUDevice。
+ * Ray-tracing Worker. One per Prism instance, exclusively owning a GPUDevice.
  *
- * 整个渲染管线（Camera / Model / Background）都跑在这个线程里，画布是
- * Worker 自己建的 OffscreenCanvas，主线程从头到尾不碰 GPU。画面通过
- * `camera.listen()` 以 ImageBitmap 推回主线程 —— 每间隔最多一帧。
+ * The entire render pipeline (Camera / Model / Background) runs on this thread.
+ * The canvas is an OffscreenCanvas created by the Worker itself, and the main
+ * thread never touches the GPU. Frames are pushed back to the main thread as
+ * ImageBitmaps through `camera.listen()`, at most one per interval.
  *
- * 这个文件同时是线程入口和组装根：运行态全部挂在 `WorkerHost` 一个实例上，
- * init 时建设备、把模型 / 环境图 / 相机三个模块装配起来。消息语义直接沉到
- * 模块 —— 机位命令和画面监听委托 camera，环境图委托 background，几何委托
- * model.add；顶层只留串行队列和回执。
+ * This file is both the thread entry point and the assembly root: all runtime
+ * state hangs off a single `WorkerHost` instance, which builds the device at
+ * init and assembles the model / environment map / camera modules. Message
+ * semantics sink straight down into the modules: camera-placement commands and
+ * frame listening are delegated to camera, the environment map to background,
+ * and geometry to model.add; the top level keeps only the serial queue and
+ * replies.
  *
- * 渲染目标、帧循环都归相机 —— 主线程那边也只有 camera 一个句柄管尺寸和出图，
- * 内外同一套分工。这里只负责把三者拼起来并持有生命周期。
+ * The render target and frame loop belong to the camera. On the main thread
+ * only the camera handle manages size and frame output, mirroring the same
+ * division of labor. This file only wires the three together and owns their
+ * lifetimes.
  *
- * Worker 不认识任何具体场景：几何要么来自 glTF 字节（worker 里解码），要么
- * 是主线程构造好 IR 推过来的裸数据（`Instance.decode` 复活）。
+ * The Worker knows nothing about specific scenes: geometry either comes from
+ * glTF bytes (decoded inside the worker) or is raw data built by the main
+ * thread as IR and pushed over (`Instance.decode` revives it).
  *
- * 销毁不走消息：Prism.dispose 直接 terminate Worker，线程没了设备自然释放，
- * 所以没有对称的 teardown 路径。
+ * Destruction is not a message: Prism.dispose simply terminates the Worker,
+ * the thread disappears and the device is released with it, so there is no
+ * symmetric teardown path.
  */
-// 纯类型导入：消息协议和门面同文件，编译后这条边会完全擦除。
+// Type-only import: the message protocol and facade live in the same file,
+// so this edge is fully erased at compile time.
 import type { CameraCommand, InstancePlacement, WorkerRequest, WorkerResponse } from '../api/prism';
 import { createDevice, WebGPUUnavailableError } from './camera/context';
 import { Camera } from './camera/camera';
@@ -30,22 +39,29 @@ import { Instance, placeInstances } from './model/instance';
 import type { WireInstance } from './model/instance';
 
 /**
- * Worker 的运行态：三个模块 + 一条串行队列。
+ * The Worker's runtime state: three modules plus one serial queue.
  *
- * 消息里凡是「模块自己会」的（机位、监听、环境图、几何）都委托下去；
- * 顶层只负责把异步操作排好队、把结果回执出去。
+ * Any message the modules handle themselves (camera placement, listening,
+ * environment map, geometry) is delegated down; the top level only queues
+ * async operations and sends results back.
  */
 class WorkerHost {
-    /** 渲染相机：init 时建，持有渲染目标和帧循环。Prism 生命周期内唯一一个。 */
+    /**
+     * Render camera: created at init, owns the render target and frame loop.
+     * Exactly one per Prism lifetime.
+     */
     private camera: Camera | null = null;
-    /** 环境光照：init 时和相机一起装配。 */
+    /** Environment lighting: assembled alongside the camera at init. */
     private background: Background | null = null;
-    /** 场景几何：BVH / 材质表，所有加几何的落点。 */
+    /** Scene geometry: BVH / material table, the destination for all added geometry. */
     private model: Model | null = null;
-    /** 异步任务的串行链。 */
+    /** Serial chain for async tasks. */
     private taskChain: Promise<void> = Promise.resolve();
 
-    /** 消息入口：写命令直接做，有返回值的进队列。 */
+    /**
+     * Message entry point: commands without return values run directly, those
+     * with return values go into the queue.
+     */
     public async handle(request: WorkerRequest): Promise<void> {
         switch (request.type) {
             case 'init':
@@ -78,7 +94,7 @@ class WorkerHost {
                 return;
             case 'model/setEmissionScale':
                 try {
-                    if (!this.model) throw new Error('Prism 还没初始化');
+                    if (!this.model) throw new Error('Prism is not initialized yet');
                     this.model.setEmissionScale(request.scale);
                     this.reply(request.id, undefined);
                 } catch (err) {
@@ -92,10 +108,12 @@ class WorkerHost {
     }
 
     /**
-     * 建设备 + 装配三个模块；已经建过就直接返回。
+     * Builds the device and assembles the three modules; returns early if already built.
      *
-     * 一个 Prism 实例只有一套引擎，只能由 init 装配。场景的机位、环境图、
-     * 几何随后分别送进来。相机最后建：构造时要拿 model 和 background 的引用。
+     * A Prism instance has exactly one engine, assembled only by init. The
+     * scene's camera placement, environment map and geometry are sent in
+     * afterwards, separately. The camera is built last: its constructor takes
+     * the model and background references.
      */
     private async initEngine(): Promise<void> {
         if (this.camera) return;
@@ -108,28 +126,32 @@ class WorkerHost {
     }
 
     /**
-     * 异步任务的串行化。
+     * Serializes async tasks.
      *
-     * `loadImage` / `Instance.buildByGltf` 都是异步的：连着调两次，先发的那次
-     * 可能后回来，把后发的那张顶掉。排队之后「最后发起的那次」一定最后落地。
+     * `loadImage` / `Instance.buildByGltf` are async: call them twice in a row
+     * and the earlier call may finish later, clobbering the later one. With the
+     * queue, the last call issued is always the last to land.
      */
     private enqueue(task: () => Promise<void>): void {
         this.taskChain = this.taskChain.then(task);
     }
 
     /**
-     * 换环境图：Blob → 解码 → 上传。
+     * Swaps the environment map: Blob → decode → upload.
      *
-     * 主线程只负责提供字节；格式识别和解码都在 Worker 里。只换图，不动
-     * 朝向；朝向由 setRotation 单独负责。
+     * The main thread only provides bytes; format detection and decoding happen
+     * in the Worker. This only swaps the image and leaves the orientation
+     * alone; orientation is handled separately by setRotation.
      *
-     * 引擎已经在跑时也可以换：Background.version() 变化会让 PathTracePass 在
-     * 下一帧重建 bind group 并清零累积。解码留在顶层（loadImage 是 ir 的
-     * 入口），解码后的 Image 才交给 background。
+     * Swapping also works while the engine is running: a change in
+     * Background.version() makes PathTracePass rebuild the bind group and clear
+     * accumulation on the next frame. Decoding stays at the top level
+     * (loadImage is the IR entry point); only the decoded Image goes to
+     * background.
      */
     private async setImage(id: number, blob: Blob): Promise<void> {
         try {
-            if (!this.background) throw new Error('Prism 还没初始化');
+            if (!this.background) throw new Error('Prism is not initialized yet');
             this.background.setImage(await loadImage(blob));
             this.reply(id, undefined);
         } catch (err) {
@@ -138,14 +160,17 @@ class WorkerHost {
     }
 
     /**
-     * 旋转环境图：不重新解码，拿 Background 留着的原图按新角度重建纹理和 CDF。
+     * Rotates the environment map: without re-decoding, rebuilds the texture and
+     * CDF at the new angle from the source image kept by Background.
      *
-     * 需要先 setImage。角度是绕 +y 的弧度，和场景数据里的 `envRotation` 同一套
-     * 定义。累积会自动清零 —— Background.version() 变了，下一帧重建 bind group。
+     * Requires setImage first. The angle is in radians around +y, sharing the
+     * same definition as `envRotation` in scene data. Accumulation clears
+     * automatically: Background.version() changes, so the bind group is rebuilt
+     * on the next frame.
      */
     private async setRotation(id: number, rotation: number): Promise<void> {
         try {
-            if (!this.background) throw new Error('Prism 还没初始化');
+            if (!this.background) throw new Error('Prism is not initialized yet');
             this.background.setRotation(rotation);
             this.reply(id, undefined);
         } catch (err) {
@@ -154,15 +179,17 @@ class WorkerHost {
     }
 
     /**
-     * 加载一个 glTF 文件里的全部 Instance，追加到当前场景。
+     * Loads every Instance from one glTF file and appends them to the current scene.
      *
-     * 解析、贴图解码和可选的整体摆位都在这里做：主线程只递字节和摆放参数。
-     * 与程序化几何入口一样，最终都落到 `model.add`；两个入口都是追加语义，
-     * 外部可以分多次调用，把多个来源拼进同一个场景。
+     * Parsing, texture decoding and optional overall placement all happen here:
+     * the main thread only hands over bytes and placement parameters. Like the
+     * procedural-geometry entry point, everything ultimately lands in
+     * `model.add`; both entries append, so callers can invoke them several times
+     * to stitch multiple sources into one scene.
      */
     private async loadGltf(id: number, source: Blob, placement?: InstancePlacement): Promise<void> {
         try {
-            if (!this.model) throw new Error('Prism 还没初始化');
+            if (!this.model) throw new Error('Prism is not initialized yet');
             const instances = await Instance.buildByGltf(source);
             if (placement) placeInstances(instances, placement);
             this.model.add(instances);
@@ -173,17 +200,19 @@ class WorkerHost {
     }
 
     /**
-     * 追加一组外部构造好的 Instance。
+     * Appends a batch of externally built Instances.
      *
-     * 主线程用 `Instance.encode` 把 IR 编成裸数据发过来（类实例过不了线程
-     * 边界），这里 `Instance.decode` 校验并复活成 IR 类实例，再走同一条
-     * `model.add`。典型来源是程序化几何：地面这类东西在 app 侧造好，
-     * 不从 glTF 走。一批只编译一次 —— 一块地砖对应一个 Instance，但不是
-     * 一次请求。
+     * The main thread uses `Instance.encode` to serialize IR into raw data
+     * (class instances cannot cross the thread boundary); here `Instance.decode`
+     * validates and revives it into IR class instances, then it takes the same
+     * `model.add` path. A typical source is procedural geometry: things like
+     * ground planes are built on the app side and do not go through glTF. A
+     * batch compiles only once: a floor tile maps to one Instance, but not to
+     * one request.
      */
     private async loadInstances(id: number, wires: readonly WireInstance[]): Promise<void> {
         try {
-            if (!this.model) throw new Error('Prism 还没初始化');
+            if (!this.model) throw new Error('Prism is not initialized yet');
             this.model.add(wires.map((wire) => Instance.decode(wire)));
             this.reply(id, undefined);
         } catch (err) {
@@ -192,11 +221,13 @@ class WorkerHost {
     }
 
     /**
-     * 机位命令：直接落到 Camera 的方法上。
+     * Camera-placement commands: forwarded straight to Camera methods.
      *
-     * resize 改的是渲染目标的尺寸，不是机位参数 —— 相机持有渲染目标和帧循环，
-     * 这里只把尺寸交给它。引擎还没建好时命令直接丢弃：句柄侧是同步不抛的，
-     * 而 `Prism.create()` 等到 init 回执才把句柄交出去，resize 不会先到。
+     * resize changes the render target size, not camera-placement parameters.
+     * The camera owns the render target and frame loop, so this just hands the
+     * size over. Commands are dropped when the engine is not built yet: the
+     * handle side is synchronous and never throws, and `Prism.create()` only
+     * hands out the handle after the init reply, so resize cannot arrive first.
      */
     private applyCamera(command: CameraCommand): void {
         if (command.type === 'resize') {
@@ -237,22 +268,23 @@ class WorkerHost {
 }
 
 /**
- * Worker 全局作用域的最小声明。
+ * Minimal declaration of the Worker global scope.
  *
- * tsconfig 的 lib 只有 DOM，`self` 是 Window —— 那上面的 postMessage 要求
- * 传 targetOrigin。Worker 里没有这一套，所以按实际用法声明一份。
+ * tsconfig's lib only includes DOM, where `self` is Window, whose postMessage
+ * requires a targetOrigin. Workers have no such thing, so this declares one
+ * matching actual usage.
  */
 const scope = self as unknown as {
     postMessage(message: WorkerResponse, transfer?: Transferable[]): void;
     onmessage: ((event: MessageEvent<WorkerRequest>) => void) | null;
 };
 
-/** 画面出口：相机的 listen 回调，把帧推回主线程。 */
+/** Frame exit: the camera's listen callback, pushing frames back to the main thread. */
 function postFrame(bitmap: ImageBitmap): void {
     scope.postMessage({ type: 'frame', bitmap }, [bitmap]);
 }
 
-/** Worker 唯一的运行态；消息全部转给它。 */
+/** The Worker's single runtime state; all messages are forwarded to it. */
 const host = new WorkerHost();
 
 scope.onmessage = (event: MessageEvent<WorkerRequest>) => {

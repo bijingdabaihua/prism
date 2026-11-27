@@ -1,63 +1,71 @@
 /**
- * ZIP 容器读取：中央目录解析、条目解压、条目 → 稳定复用的 blob URL。
+ * ZIP container reading: central-directory parsing, entry decompression, and stable reusable
+ * blob URLs for entries.
  *
- * 下载来的资产包（glTF 的 .zip、Poly Haven 材质包）只解需要的条目，把内部相对
- * 路径换成 blob URL；之后仍走原来的外链流程，不为 ZIP 分叉解码器。
- * 只支持普通 ZIP（单卷、非加密、非 ZIP64）；不支持的情况明确报错。
+ * Downloaded asset packs (glTF .zip files, Poly Haven material packs) have only the needed
+ * entries extracted, with internal relative paths replaced by blob URLs; the normal external
+ * link flow then continues, with no separate decoder path for ZIP.
+ * Only ordinary ZIP files are supported (single-volume, unencrypted, not ZIP64);
+ * unsupported cases raise an explicit error.
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * The file has two layers: contract (all exports) and implementation (no exports);
+ * see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ═════════════════ Contract layer (exports) ══════════════════
 
 export interface ZipEntry {
     method: number;
     compressedSize: number;
     uncompressedSize: number;
-    /** 该条目数据在 ZIP 文件里的起始字节。 */
+    /** Starting byte of this entry's data within the ZIP file. */
     dataOffset: number;
 }
 
 export interface ZipArchive {
     buffer: ArrayBuffer;
     entries: Map<string, ZipEntry>;
-    /** 同一个来源跨多次加载的稳定标识，用来复用解压结果与 blob URL。 */
+    /** Stable identifier for the same source across loads, used to reuse decompressed
+     * results and blob URLs. */
     cacheId: string;
     label: string;
 }
 
-/** 源字节是不是 ZIP（本地文件头，或空 ZIP 直接就是 EOCD）。 */
+/** Whether the source bytes are a ZIP (local file header, or EOCD directly for an empty ZIP). */
 export let isZip: (buf: ArrayBuffer) => boolean;
 
 /**
- * 源字节的内容指纹（FNV-1a）。
+ * Content fingerprint of the source bytes (FNV-1a).
  *
- * Blob 经 postMessage 到 Worker 后会变成新对象，按对象身份缓存对「外部一个
- * 一个传同一个 Blob」无效；按内容算才能跨消息复用 ZIP 解压结果和贴图层。
+ * A Blob becomes a new object after postMessage into the Worker, so caching by object
+ * identity fails when the same Blob is passed in separately each time; hashing the content
+ * allows ZIP decompression results and texture layers to be reused across messages.
  */
 export let contentCacheId: (buf: ArrayBuffer) => string;
 
 /**
- * 读 EOCD → 中央目录 → 条目表。
+ * Reads EOCD → central directory → entry table.
  *
- * 只支持普通 ZIP（单卷、非加密、非 ZIP64）。素材包通常都是这种；不支持
- * 的情况明确报错，免得后面拿一堆乱码去喂解析器。
+ * Only ordinary ZIP files are supported (single-volume, unencrypted, not ZIP64). Asset packs
+ * usually are; unsupported cases raise an explicit error so garbage is not fed to the parser.
  */
 export let parseZip: (buf: ArrayBuffer, label: string, cacheId: string) => ZipArchive;
 
-/** 解出一个条目的原始字节；STORED 直接切片，DEFLATE 走 DecompressionStream。 */
+/** Extracts an entry's raw bytes; STORED is sliced directly, DEFLATE goes through
+ * DecompressionStream. */
 export let readZipEntry: (zip: ZipArchive, path: string) => Promise<Uint8Array<ArrayBuffer>>;
 
-/** ZIP 条目 → 可 fetch 的 blob URL；同一个来源的同一个路径只解压 / 建 URL 一次。 */
+/** ZIP entry → fetchable blob URL; each path in a source is decompressed and URL-created once. */
 export let zipEntryUrl: (zip: ZipArchive, path: string) => Promise<string>;
 
-/** dir（ZIP 内目录，以 '/' 结尾）下的相对 URI 解析成规范化 ZIP 路径。 */
+/** Resolves a relative URI under dir (a directory inside the ZIP ending in '/') to a
+ * normalized ZIP path. */
 export let resolveZipPath: (dir: string, uri: string) => string;
 
-/** `https:` / `data:` 这类绝对 URI 原样使用，不进 ZIP 查表。 */
+/** Absolute URIs such as `https:` / `data:` are used as-is and not looked up in the ZIP. */
 export let isAbsoluteUri: (uri: string) => boolean;
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ════════════ Implementation layer (not exported) ═════════════
 
 const ZIP_LOCAL = 0x04034b50;
 const ZIP_CENTRAL = 0x02014b50;
@@ -65,7 +73,7 @@ const ZIP_END = 0x06054b50;
 const ZIP_METHOD_STORED = 0;
 const ZIP_METHOD_DEFLATE = 8;
 
-/** ZIP 条目 → 已解压的 blob URL；键按「来源 + 路径」，跨加载复用。 */
+/** ZIP entry → decompressed blob URL; keyed by source + path and reused across loads. */
 const zipObjectUrls = new Map<string, Promise<string>>();
 
 isZip = (buf) => {
@@ -94,7 +102,7 @@ parseZip = (buf, label, cacheId) => {
             break;
         }
     }
-    if (eocd < 0) throw new Error(`${label}: ZIP 里找不到中央目录（文件损坏或不是 ZIP）`);
+    if (eocd < 0) throw new Error(`${label}: no central directory found in ZIP (corrupt file or not a ZIP)`);
 
     const count = view.getUint16(eocd + 10, true);
     let offset = view.getUint32(eocd + 16, true);
@@ -103,7 +111,7 @@ parseZip = (buf, label, cacheId) => {
 
     for (let i = 0; i < count; i++) {
         if (offset + 46 > buf.byteLength || view.getUint32(offset, true) !== ZIP_CENTRAL) {
-            throw new Error(`${label}: ZIP 中央目录损坏`);
+            throw new Error(`${label}: corrupt ZIP central directory`);
         }
         const flags = view.getUint16(offset + 8, true);
         const method = view.getUint16(offset + 10, true);
@@ -114,27 +122,27 @@ parseZip = (buf, label, cacheId) => {
         const commentLength = view.getUint16(offset + 32, true);
         const localOffset = view.getUint32(offset + 42, true);
         if (offset + 46 + nameLength > buf.byteLength) {
-            throw new Error(`${label}: ZIP 文件名越界`);
+            throw new Error(`${label}: ZIP file name is out of bounds`);
         }
         const name = decoder
             .decode(new Uint8Array(buf, offset + 46, nameLength))
             .replace(/\\/g, '/')
             .replace(/^\/+/, '');
 
-        if (flags & 1) throw new Error(`${label}: 不支持加密 ZIP（${name}）`);
+        if (flags & 1) throw new Error(`${label}: encrypted ZIP is not supported (${name})`);
         if (compressedSize === 0xffffffff || uncompressedSize === 0xffffffff || localOffset === 0xffffffff) {
-            throw new Error(`${label}: 不支持 ZIP64（${name}）`);
+            throw new Error(`${label}: ZIP64 is not supported (${name})`);
         }
 
         if (name && !name.endsWith('/')) {
             if (localOffset + 30 > buf.byteLength || view.getUint32(localOffset, true) !== ZIP_LOCAL) {
-                throw new Error(`${label}: ZIP 条目头损坏（${name}）`);
+                throw new Error(`${label}: corrupt ZIP entry header (${name})`);
             }
             const localName = view.getUint16(localOffset + 26, true);
             const localExtra = view.getUint16(localOffset + 28, true);
             const dataOffset = localOffset + 30 + localName + localExtra;
             if (dataOffset + compressedSize > buf.byteLength) {
-                throw new Error(`${label}: ZIP 条目越界（${name}）`);
+                throw new Error(`${label}: ZIP entry is out of bounds (${name})`);
             }
             entries.set(name, { method, compressedSize, uncompressedSize, dataOffset });
         }
@@ -147,21 +155,21 @@ parseZip = (buf, label, cacheId) => {
 
 readZipEntry = async (zip, path) => {
     const entry = zip.entries.get(path);
-    if (!entry) throw new Error(`${zip.label}: ZIP 里没有 "${path}"`);
+    if (!entry) throw new Error(`${zip.label}: ZIP has no entry "${path}"`);
 
     const raw = new Uint8Array(zip.buffer, entry.dataOffset, entry.compressedSize);
     if (entry.method === ZIP_METHOD_STORED) return raw.slice();
     if (entry.method !== ZIP_METHOD_DEFLATE) {
-        throw new Error(`${zip.label}: 不支持的 ZIP 压缩方式 ${entry.method}（${path}）`);
+        throw new Error(`${zip.label}: unsupported ZIP compression method ${entry.method} (${path})`);
     }
 
     if (typeof DecompressionStream === 'undefined') {
-        throw new Error(`${zip.label}: 这个浏览器没有 DecompressionStream，无法解压 ZIP`);
+        throw new Error(`${zip.label}: this browser has no DecompressionStream, cannot decompress ZIP`);
     }
     const stream = new Blob([raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
     const out = new Uint8Array(await new Response(stream).arrayBuffer());
     if (out.byteLength !== entry.uncompressedSize) {
-        throw new Error(`${zip.label}: "${path}" 解压后长度不对`);
+        throw new Error(`${zip.label}: decompressed length mismatch for "${path}"`);
     }
     return out;
 };
@@ -184,7 +192,7 @@ resolveZipPath = (dir, uri) => {
     try {
         decoded = decodeURIComponent(raw);
     } catch {
-        // 原样使用；查不到时错误信息里还能看到原始路径
+        // Use as-is; if lookup fails the error still shows the original path
     }
     const parts: string[] = [];
     for (const part of `${dir}${decoded}`.split('/')) {

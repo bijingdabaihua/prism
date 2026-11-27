@@ -2,31 +2,34 @@ import type { AABB, Vec3 } from '../../math/types';
 import type { Mesh } from './mesh';
 
 /**
- * BVH 构建：泛型分桶 SAH（叶子最多两个图元，节点定长 8 floats），
- * 以及按 mesh 缓存的 BLAS。
+ * BVH construction: generic binned SAH (leaves hold at most two primitives, nodes are a
+ * fixed 8 floats), plus a BLAS cached per mesh.
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * The file has two layers: contract (all exports) and implementation (no exports);
+ * see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ═════════════════ Contract layer (exports) ══════════════════
 
 /**
- * 一组带包围盒的图元 → 扁平 BVH（每节点 8 floats：min.xyz / max.xyz / 左右槽）。
+ * A set of primitives with bounds → a flat BVH (8 floats per node: min.xyz / max.xyz /
+ * left and right slots).
  *
- * 分桶 SAH：对三条轴各分一版桶，选代价最小的切法。代价是 traversal SAH ——
- * `面积(左) × 左数量 + 面积(右) × 右数量`，即「随机光线穿过这棵树期望要做
- * 多少次包围盒测试」。构建比中位数慢几倍，但树只在装载时建一次，之后每条
- * 光线都在遍历它。
+ * Binned SAH: bin along each of the three axes and pick the cheapest split. The cost is
+ * traversal SAH — `area(left) × count(left) + area(right) × count(right)`, i.e. how many
+ * bounding-box tests a random ray is expected to perform through this tree. Construction is
+ * a few times slower than a median split, but the tree is built once at load time and every
+ * ray traverses it afterward.
  */
 export let buildBvh: <T>(items: readonly T[], getBounds: (item: T) => AABB) => Float32Array;
 
 /**
- * 按 mesh 缓存的 BLAS：同一个 mesh 的多个 instance 共享同一棵树。
- * 重建场景时 mesh 对象不变，缓存命中，不用重算。
+ * BLAS cached per mesh: multiple instances of the same mesh share one tree.
+ * Rebuilding the scene keeps mesh objects unchanged, so the cache hits and nothing is recomputed.
  */
 export let meshBlas: (mesh: Mesh) => Float32Array;
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ════════════ Implementation layer (not exported) ═════════════
 
 class BvhNode {
     public bounds: AABB;
@@ -62,23 +65,25 @@ buildBvh = <T>(items: readonly T[], getBounds: (item: T) => AABB): Float32Array 
     return flat;
 };
 
-/** SAH 的分桶数。16 是常用值：再细收益落在噪声里，构建却线性变慢。 */
+/** Number of SAH bins. 16 is a common choice: finer bins only add noise to the gain while
+ * construction slows down linearly. */
 const SAH_BINS = 16;
 
 /**
- * 回到中位数切分的深度。
+ * Depth at which to fall back to a median split.
  *
- * SAH 愿意为了「面积 × 数量」更小的切法接受左右不均衡，树因此可能长歪；
- * 而 shader 的遍历栈是 64 层（`bvh.wgsl` 的 `array<u32, 64>`）。到这条线就
- * 强制对半分 —— 之后每层至少分走一半，最多再长 log2(n) 层。
+ * SAH accepts imbalance between left and right for a lower "area × count" cost, so the tree
+ * can grow lopsided; the shader's traversal stack holds 64 levels (`array<u32, 64>` in
+ * `bvh.wgsl`). At this depth a forced half split applies: each level then takes at least half,
+ * so the tree grows at most log2(n) more levels.
  */
 const SAH_MAX_DEPTH = 40;
 
 const AXES = ['x', 'y', 'z'] as const;
 
 /**
- * 叶子最多两个图元（节点格式决定的，两个槽各指一个图元），所以这里只
- * 决定「怎么切」，「要不要切」没有余地。
+ * A leaf holds at most two primitives (fixed by the node format: two slots, one primitive
+ * each), so this only decides how to split; whether to split is not a choice.
  */
 function buildNode<T>(items: ItemData<T>[], depth: number): BvhNode {
     const count = items.length;
@@ -97,9 +102,9 @@ function buildNode<T>(items: ItemData<T>[], depth: number): BvhNode {
 }
 
 interface SahSplit {
-    /** 每个图元落在哪个桶（沿选中轴）。 */
+    /** Which bin each primitive falls into (along the chosen axis). */
     bins: Uint8Array;
-    /** 左半 = 桶号 ≤ 它的所有图元。 */
+    /** Left half = all primitives with bin number ≤ this. */
     splitBin: number;
     cost: number;
 }
@@ -121,7 +126,7 @@ function findSahSplit<T>(items: ItemData<T>[]): SahSplit | null {
     for (const axis of AXES) {
         const lo = cmin[axis];
         const extent = cmax[axis] - lo;
-        // 质心在这条轴上完全重合，分不开
+        // Centroids coincide completely on this axis; cannot split
         if (!(extent > 0)) continue;
 
         const scale = SAH_BINS / extent;
@@ -129,14 +134,14 @@ function findSahSplit<T>(items: ItemData<T>[]): SahSplit | null {
         const counts = new Uint32Array(SAH_BINS);
         const binBounds: AABB[] = Array.from({ length: SAH_BINS }, emptyBounds);
         for (let i = 0; i < n; i++) {
-            // 最大质心正好落在 SAH_BINS 上，夹回最后一桶
+            // The largest centroid lands exactly on SAH_BINS; clamp it to the last bin
             const b = Math.min(SAH_BINS - 1, Math.floor((items[i]!.centroid[axis] - lo) * scale));
             bins[i] = b;
             counts[b]!++;
             growBounds(binBounds[b]!, items[i]!.bounds);
         }
 
-        // 两侧各扫一遍，得到「切在第 i 桶之后」时左右两边的面积和数量
+        // Sweep both sides to get the area and count of each side for a split after bin i
         const leftArea = new Float64Array(SAH_BINS);
         const rightArea = new Float64Array(SAH_BINS);
         const leftCount = new Uint32Array(SAH_BINS);
@@ -168,7 +173,8 @@ function findSahSplit<T>(items: ItemData<T>[]): SahSplit | null {
     return best;
 }
 
-/** 按桶计数排序后对半切开 —— O(n)，比重新排序快，也保证同桶图元不跨左右。 */
+/** Counting-sorts by bin and splits in half — O(n), faster than re-sorting, and keeps
+ * same-bin primitives on one side. */
 function partitionByBin<T>(items: ItemData<T>[], split: SahSplit): [ItemData<T>[], ItemData<T>[]] {
     const start = new Uint32Array(SAH_BINS + 1);
     for (const b of split.bins) start[b + 1]!++;
@@ -182,7 +188,8 @@ function partitionByBin<T>(items: ItemData<T>[], split: SahSplit): [ItemData<T>[
     return [sorted.slice(0, k), sorted.slice(k)];
 }
 
-/** 兜底：最长轴质心中位数对半分。质心全重合、或已经到深度上限时用它。 */
+/** Fallback: split at the centroid median of the longest axis. Used when centroids all
+ * coincide or the depth limit is reached. */
 function medianPartition<T>(items: ItemData<T>[]): [ItemData<T>[], ItemData<T>[]] {
     const b = mergeAllBounds(items);
     const ex = b.max.x - b.min.x;
@@ -210,7 +217,7 @@ function growBounds(a: AABB, b: AABB): void {
     if (b.max.z > a.max.z) a.max.z = b.max.z;
 }
 
-/** 表面积（半值，差一个常数不影响比较）。 */
+/** Surface area (half value; a constant factor does not affect comparisons). */
 function area(b: AABB): number {
     const dx = b.max.x - b.min.x;
     const dy = b.max.y - b.min.y;
@@ -274,7 +281,7 @@ function mergeBounds(a: AABB, b: AABB): AABB {
     };
 }
 
-/** Mesh IR → BLAS（扁平 BVH 数组）。同一个 Mesh 只应构建一次。 */
+/** Mesh IR → BLAS (flat BVH array). Each Mesh should be built only once. */
 const blasCache = new WeakMap<Mesh, Float32Array>();
 
 meshBlas = (mesh) => {
@@ -300,7 +307,7 @@ function buildMeshBvh(mesh: Mesh): Float32Array {
             mxY = -Infinity,
             mxZ = -Infinity;
         for (const vi of [tri[off], tri[off + 1], tri[off + 2]]) {
-            // vertexData 是交错的 12 floats/vertex，位置在前 3 个
+            // vertexData is interleaved at 12 floats/vertex; position is the first 3
             const b = vi * 12;
             mnX = Math.min(mnX, vd[b]);
             mxX = Math.max(mxX, vd[b]);

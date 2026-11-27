@@ -3,80 +3,86 @@ import { decodeExr } from './exr';
 import type { TextureKind } from './material/material';
 
 /**
- * 场景 IR 里的图像，以及图像 / 贴图的导入器。
+ * Images in the scene IR, plus the image and texture importers.
  *
- * 与来源格式无关的、解码后的线性浮点数据。所有格式（.hdr / .exr / .png / .jpg …）
- * 的唯一出口都是它，渲染侧只认这个类型，所以看不出源文件是什么格式。
+ * Source-format-agnostic, decoded linear floating-point data. Every format
+ * (.hdr / .exr / .png / .jpg …) converges here, and the render side knows only this type, so
+ * it cannot tell what format the source file was.
  *
- * 解码器在实现层：`loadImage` 是任意来源的入口，`loadTexture` 是材质贴图的
- * 入口。这里是**唯一**允许知道「.exr / .hdr / .png」存在的地方 ——
- * 新增一种格式 = 加一个 decodeXxx + 在 sniff 里认一下 magic，渲染层一行不动。
+ * Decoders live in the implementation layer: `loadImage` is the entry point for any source
+ * and `loadTexture` for material textures. This is the **only** place allowed to know that
+ * ".exr / .hdr / .png" exist — adding a format means adding a decodeXxx plus a magic check
+ * in sniff, with no change to the render layer.
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * The file has two layers: contract (all exports) and implementation (no exports);
+ * see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ═════════════════ Contract layer (exports) ══════════════════
 
 /**
- * 场景 IR 里的图像。
+ * An image in the scene IR.
  *
- * 约定：
- * - 数据是**线性**光值，不是 sRGB 编码值。显示编码在 GPU 编译层再做。
- * - 数值未归一化，可以大于 1（HDR 环境图的辐照度本来就 > 1）。
- * - layout 区分两种用途：equirect 是等距柱状环境图（宽高比 2:1），
- *   texture 是可以平铺的 2D 贴图。将来要支持 cubemap，就在这里加变体，
- *   而不是改渲染层。
+ * Conventions:
+ * - Data holds **linear** light values, not sRGB-encoded values. Display encoding happens
+ *   later in the GPU compile layer.
+ * - Values are not normalized and may exceed 1 (HDR environment-map radiance is naturally > 1).
+ * - layout distinguishes two uses: equirect is an equidistant cylindrical environment map
+ *   (2:1 aspect ratio), texture is a tileable 2D map. To support cubemaps later, add a variant
+ *   here rather than changing the render layer.
  */
 export interface Image {
     readonly width: number;
     readonly height: number;
-    /** 3 通道 RGB，row-major，长度 = width * height * 3 */
+    /** 3-channel RGB, row-major, length = width * height * 3 */
     readonly data: Float32Array;
     readonly layout: 'equirect' | 'texture';
     /**
-     * 一格贴图覆盖的真实尺寸（米）。没有就是 1 m 一格。
+     * Real-world size covered by one texture cell (meters). Absent means 1 m per cell.
      *
-     * 图像空间到物理空间的唯一换算依据，只能由资产来源提供 —— 贴图文件里
-     * 没有这个信息（Poly Haven 的 `dimensions` 字段给的是毫米）。
-     * 着色时把它折成 texel 覆盖（每米重复 1/meters 次），位移时把米制 UV
-     * 折成图上的重复，两边读的是同一个数。
+     * The only conversion between image space and physical space, and only the asset source
+     * can provide it — texture files do not carry this information (Poly Haven's `dimensions`
+     * field is in millimeters). Shading folds it into texel coverage (1/meters repeats per
+     * meter), displacement folds metric UVs into texture repeats, and both read the same value.
      */
     readonly meters?: number;
 }
 
 export interface ImageOptions {
     /**
-     * 位图是否按 sRGB 解码成线性。颜色贴图为 true（默认）；
-     * 法线、粗糙度这类**数据贴图**必须为 false —— 它们的数值不是颜色，
-     * 做一次 sRGB 解码会把粗糙度整体压暗，材质看起来会偏黑偏亮。
+     * Whether to decode a bitmap from sRGB to linear. True (the default) for color maps;
+     * **data maps** such as normal and roughness must be false — their values are not colors,
+     * and an sRGB decode would darken roughness overall, making materials look too dark or
+     * too bright.
      */
     srgb?: boolean;
-    /** 输出用途。环境图是 equirect，材质贴图是 texture。 */
+    /** Output use. Environment maps are equirect; material textures are texture. */
     layout?: 'equirect' | 'texture';
-    /** 一格贴图覆盖的真实尺寸（米），见 `Image.meters`。 */
+    /** Real-world size covered by one texture cell (meters); see `Image.meters`. */
     meters?: number;
 }
 
 /**
- * 任意来源的图像入口：URL 由内部 fetch，Blob 直接读字节。
+ * Image entry point for any source: URLs are fetched internally, Blobs are read directly.
  *
- * 格式识别和解码始终在实现层完成 —— 调用方只需要给来源，不需要知道
- * 它是 EXR、HDR 还是位图。
+ * Format detection and decoding always happen in the implementation layer — callers only
+ * supply the source and need not know whether it is EXR, HDR or a bitmap.
  */
 export let loadImage: (source: string | Blob, options?: ImageOptions) => Promise<Image>;
 
 /**
- * 材质贴图的解码与去重。
+ * Decodes material textures and deduplicates them.
  *
- * PBRMaterial 的贴图字段是解码后的 Image，所以解码发生在导入器里 —— 也就是
- * 这里，用户代码在造材质时 await 它。同一张图（同 kind + 同 URL）只解码一次，
- * 返回同一个 Image 对象：TextureSet 按对象身份去重图层，重复解码会多占一层。
+ * PBRMaterial texture fields are decoded Images, so decoding happens in the importer — here —
+ * and user code awaits it while building materials. The same image (same kind + same URL) is
+ * decoded once and returns the same Image object: TextureSet deduplicates layers by object
+ * identity, so decoding twice would waste a layer.
  *
- * 颜色贴图按 sRGB 解码，法线 / 粗糙度 / AO 保持原始数值。
+ * Color maps are decoded as sRGB; normal, roughness and AO keep their raw values.
  */
 export let loadTexture: (url: string, kind: TextureKind, meters?: number) => Promise<Image>;
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ════════════ Implementation layer (not exported) ═════════════
 
 loadImage = async (source, options) => {
     let buf: ArrayBuffer;
@@ -105,7 +111,7 @@ const IS_COLOR: Record<TextureKind, boolean> = {
 const textureCache = new Map<string, Promise<Image>>();
 
 loadTexture = (url, kind, meters) => {
-    // 一格几米进缓存键：同一张图配不同的尺度，得是不同的 Image。
+    // Meters per cell is part of the cache key: one image at different scales is a different Image.
     const key = `${kind}:${url}:${meters ?? 1}`;
     let job = textureCache.get(key);
     if (!job) {
@@ -115,9 +121,9 @@ loadTexture = (url, kind, meters) => {
     return job;
 };
 
-// 解码
+// Decoding
 
-/** 按 magic bytes 判断格式，不看扩展名——URL 怎么起名不影响解码。 */
+/** Detects the format from magic bytes, not the extension — URL naming does not affect decoding. */
 function sniff(buf: ArrayBuffer): 'exr' | 'hdr' | 'bitmap' {
     const b = new Uint8Array(buf, 0, Math.min(8, buf.byteLength));
     // OpenEXR: 0x76 0x2f 0x31 0x01
@@ -142,7 +148,7 @@ async function decodeImage(buf: ArrayBuffer, options?: ImageOptions): Promise<Im
     }
 }
 
-// Radiance HDR (.hdr) —— RGBE / 新式扫描线 RLE
+// Radiance HDR (.hdr) — RGBE / modern scanline RLE
 
 function decodeHdr(buf: ArrayBuffer): Image {
     const bytes = new Uint8Array(buf);
@@ -169,7 +175,7 @@ function decodeHdr(buf: ArrayBuffer): Image {
         throw new Error(`Unsupported HDR format: ${format}`);
     }
 
-    // 分辨率行，形如 "-Y 1024 +X 2048"
+    // Resolution line, of the form "-Y 1024 +X 2048"
     const res = readLine().trim().split(/\s+/);
     if (res.length !== 4) throw new Error(`Bad HDR resolution line: "${res.join(' ')}"`);
     const [axisY, hStr, axisX, wStr] = res;
@@ -194,7 +200,7 @@ function decodeHdr(buf: ArrayBuffer): Image {
 
         if (isNewRLE) {
             pos += 4;
-            // 4 个通道各自做 RLE
+            // RLE runs separately for each of the 4 channels
             for (let c = 0; c < 4; c++) {
                 let x = 0;
                 while (x < width) {
@@ -212,7 +218,8 @@ function decodeHdr(buf: ArrayBuffer): Image {
                 }
             }
         } else {
-            // 旧式平铺。旧式 (1,1,1,n) 运行长度编码未支持——现代导出器已不使用。
+            // Old-style flat data. Legacy (1,1,1,n) run-length encoding is not supported;
+            // modern exporters do not use it.
             if (pos + width * 4 > bytes.length) throw new Error('Truncated HDR scanline');
             scanline.set(bytes.subarray(pos, pos + width * 4));
             pos += width * 4;
@@ -229,7 +236,7 @@ function decodeHdr(buf: ArrayBuffer): Image {
         }
     }
 
-    // RGBE → 线性浮点
+    // RGBE → linear floats
     const data = new Float32Array(width * height * 3);
     for (let i = 0; i < width * height; i++) {
         const e = rgbe[i * 4 + 3];
@@ -242,7 +249,7 @@ function decodeHdr(buf: ArrayBuffer): Image {
     return { width, height, data, layout: 'equirect' };
 }
 
-// 位图 (PNG / JPEG / WebP …) —— 8 位，srgb=true 时解码到线性
+// Bitmaps (PNG / JPEG / WebP …) — 8-bit, decoded to linear when srgb=true
 
 async function decodeBitmap(buf: ArrayBuffer, srgb: boolean): Promise<Image> {
     const bitmap = await createImageBitmap(new Blob([buf]), { colorSpaceConversion: 'none' });

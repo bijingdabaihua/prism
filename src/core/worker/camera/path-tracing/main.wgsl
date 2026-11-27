@@ -1,15 +1,17 @@
 // Path tracing with NEE (Next Event Estimation) — explicit direct light sampling + indirect scattering
 
-/** 从第几次弹射之后开始做俄罗斯轮盘赌（0 起算）。 */
+/** Bounce after which Russian roulette starts (0-based). */
 const RR_START_BOUNCE: u32 = 4u;
 
 // Camera ray generation — pixel coordinates + sub-pixel jitter for AA.
 // Consumes 2 LDS dimensions (pixel_x, pixel_y jitter), plus 2 more when the
 // lens has an aperture (thin-lens depth of field).
 //
-// 薄透镜：像素决定的是**焦平面上**的那个点，不是方向。光线从光圈圆盘上的
-// 一个随机点出发、指向那个点 —— 圆盘越大，焦平面之外的物体散得越开。
-// 光圈半径为 0 时圆盘退化成一个点，整条式子还原成针孔，不多采一次样。
+// Thin lens: a pixel determines a point **on the focal plane**, not a direction.
+// The ray starts at a random point on the aperture disk and aims at that point —
+// the larger the disk, the more objects outside the focal plane blur. When the
+// aperture radius is 0 the disk degenerates to a point, the expression reduces to
+// a pinhole, and no extra sample is taken.
 fn generate_ray(pixel_x: u32, pixel_y: u32, seed: u32, dim: ptr<function, u32>) -> Ray {
   let eye = camera.camera_position.xyz;
   let jx = lds(seed, u.frame_index, *dim); *dim += 1u;
@@ -26,13 +28,15 @@ fn generate_ray(pixel_x: u32, pixel_y: u32, seed: u32, dim: ptr<function, u32>) 
     return Ray(eye, direction);
   }
 
-  // 光圈圆盘上均匀取一点：半径按 sqrt(r) 铺，否则会挤在圆心。
+  // Uniform point on the aperture disk: distribute the radius by sqrt(r),
+  // otherwise points bunch at the center.
   let r1 = lds(seed, u.frame_index, *dim); *dim += 1u;
   let r2 = lds(seed, u.frame_index, *dim); *dim += 1u;
   let radius = sqrt(r1) * camera.aperture_radius;
   let angle = 2.0 * 3.14159265 * r2;
 
-  // 相机的右/上基。视线竖直向下时 cross 退化，退回世界 X 轴。
+  // Camera right/up basis. When the view direction is straight down, cross
+  // degenerates; fall back to the world X axis.
   let right_raw = cross(direction, vec3(0.0, 1.0, 0.0));
   let right = select(vec3(1.0, 0.0, 0.0), normalize(right_raw), length(right_raw) > 1e-6);
   let up = cross(right, direction);
@@ -119,7 +123,8 @@ fn scatter(hit: SurfaceInfo, seed: u32, dim: ptr<function, u32>) -> Scatter {
     if (lobe < hit.transmission) { return scatter_glass(hit, r1); }
   }
   let bsdf = sample_bsdf(hit, r1, r2, r3);
-  // 采到地平线以下（pdf = 0）：这个样本没有定义，直接终止路径
+  // Sampled below the horizon (pdf = 0): the sample is undefined, so terminate
+  // the path.
   if (bsdf.pdf <= 0.0) { return Scatter(vec3(0.0), vec3(0.0), false, hit); }
   let weight = bsdf.f * abs(dot(hit.normal, bsdf.wo)) / max(bsdf.pdf, 1e-6);
 
@@ -131,14 +136,16 @@ fn scatter(hit: SurfaceInfo, seed: u32, dim: ptr<function, u32>) -> Scatter {
     // Probe escaped into the environment — add its radiance here (BSDF-weighted)
     // and terminate.  Deferring this to the next bounce dropped it when the
     // bounce budget ran out (e.g. max_bounces=0 → box exteriors went black).
-    // MIS: 环境 NEE 也可能采到同一个方向，功率启发式分摊，否则会重复计能量。
-    // 镜面样本按粗糙度取预滤波的 mip（光滑表面只糊一点点）；余弦样本一律
-    // 取 mip 0 —— 见 BSDFSample.specular 的注释。
+    // MIS: environment NEE may also sample the same direction; the power heuristic
+    // splits the contribution, otherwise energy is counted twice.
+    // Specular samples use a roughness-based prefiltered mip (smooth surfaces blur
+    // only slightly); cosine samples always use mip 0 — see the BSDFSample.specular comment.
     let env = select(env_radiance(bsdf.wo), env_radiance_rough(bsdf.wo, hit.roughness), bsdf.specular);
     let pdf_env = environment_pdf(bsdf.wo);
     let mis_w = mis_weight(bsdf.pdf, pdf_env);
-    // AO 的第一处：天空/环境来的一次散射光按遮蔽率衰减（这就是 AO 的本意：
-    // 天空可见度）。太阳的 NEE 项不在这里，仍在 direct_light 里原样保留。
+    // First AO application: single-bounce light from the sky/environment is
+    // attenuated by the occlusion factor (that's what AO means: sky visibility).
+    // The sun's NEE term isn't here; it remains unchanged in direct_light.
     return Scatter(mis_w * weight * env * hit.ao, vec3(0.0), false, next_hit);
   }
   var emitted = vec3(0.0);
@@ -190,15 +197,18 @@ fn path_trace(ray: Ray, seed: u32, dim: ptr<function, u32>) -> vec3<f32> {
     let scat = scatter(hit, seed, dim);
     L += beta * scat.contrib;
     if (!scat.alive) { break; }
-    // AO 只乘在「继续弹出去的路径」上：直接光（NEE 和本 bounce 的 BSDF 命中）
-    // 已经加进 L 了，不受影响。这一项等于把宏观遮挡当作间接光的可见度。
+    // AO multiplies only paths that keep bouncing: direct light (NEE and the BSDF
+    // hit this bounce) is already in L and unaffected. This term treats macro
+    // occlusion as visibility for indirect light.
     beta *= scat.weight * hit.ao;
 
     hit = scat.next;
 
-    // 俄罗斯轮盘赌：第 4 次弹射之后按吞吐量决定是否继续，终止的路径按 1/p
-    // 补偿。期望值不变，但避免了 max_bounces 硬截断带来的能量损失
-    // （封闭盒子里 albedo 0.73，截断 5 次就丢掉两成能量）。
+    // Russian roulette: after the 4th bounce, decide whether to continue based on
+    // throughput; terminated paths are compensated by 1/p. The expected value is
+    // unchanged, but it avoids the energy loss of a hard max_bounces cutoff (with
+    // albedo 0.73 in a closed box, cutting off after 5 bounces loses about 20% of
+    // the energy).
     if (bounce >= RR_START_BOUNCE) {
       let p = clamp(max(beta.r, max(beta.g, beta.b)), 0.05, 1.0);
       let rr = lds(seed, u.frame_index, *dim); *dim += 1u;
@@ -212,9 +222,11 @@ fn path_trace(ray: Ray, seed: u32, dim: ptr<function, u32>) -> vec3<f32> {
 
 // Progressive accumulation
 //
-// 部分采样：每帧只写顺序表里连续的一段（dispatch_count 个像素），其余像素
-// 由 CPU 侧每帧的纹理拷贝原样保留。所以「这个像素采过几次」不能再用帧号，
-// 而是由它在顺序表里的位置决定 —— 见 main。
+// Partial sampling: each frame writes only a contiguous run of the order table
+// (dispatch_count pixels); the remaining pixels are preserved by the CPU-side
+// texture copy each frame. So "how many times this pixel was sampled" can no
+// longer use the frame index — it is determined by its position in the order
+// table. See main.
 fn accumulate(coordinate: vec2<i32>, radiance: vec3<f32>, previous_count: u32) {
   let prev = textureLoad(previous_accumulation_texture, coordinate, 0).rgb;
   let count = f32(previous_count);
@@ -222,12 +234,14 @@ fn accumulate(coordinate: vec2<i32>, radiance: vec3<f32>, previous_count: u32) {
   textureStore(out_texture, coordinate, vec4(blended, 1.0));
 }
 
-// 1D dispatch：一个线程 = 顺序表里的一个像素。
+// 1D dispatch: one thread = one pixel in the order table.
 //
-// 全局采样序号 sample_index = cursor + slot，顶多跨过一轮边界
-// （CPU 保证 dispatch_count ≤ pixel_count）。顺序表是一整轮无重复的随机
-// 排列，每跨过 pixel_count 个采样，所有像素恰好各多采一次，所以
-// previous_count = 已完成轮数 + (本次是否已跨入下一轮)，不需要逐像素存计数。
+// Global sample index sample_index = cursor + slot; it crosses a sweep boundary
+// at most once (the CPU guarantees dispatch_count ≤ pixel_count). The order table
+// is a random permutation with no repeats over a full sweep, so every time
+// pixel_count samples are crossed, all pixels have been sampled exactly once
+// more; therefore previous_count = completed sweeps + (whether this one crossed
+// into the next sweep), with no per-pixel counter needed.
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let slot = id.x;

@@ -85,9 +85,10 @@ fn intersect_scene(ray: Ray) -> BVHResult {
         let inst = instances[instance_id];
 
         let local_origin = (inst.inv_transform * vec4(ray.origin, 1.0)).xyz;
-        // 不要归一化：保留 inv_transform 的长度伸缩，t 才继续是世界射线上的距离。
-        // 归一化后 t 会变成局部单位，缩放过（非单位缩放）的实例就会拿局部 t
-        // 去和世界 t 比较，结果是它永远比远处的东西"更远"而被打掉。
+        // Don't normalize: preserving inv_transform's length scaling keeps t as a
+        // distance along the world ray. If normalized, t becomes local units, and a
+        // scaled (non-unit-scale) instance compares local t against world t, so it
+        // always ends up "farther" than distant objects and gets culled.
         let local_direction = (inst.inv_transform * vec4(ray.direction, 0.0)).xyz;
         let local_ray = Ray(local_origin, local_direction);
 

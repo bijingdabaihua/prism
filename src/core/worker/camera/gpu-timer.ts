@@ -1,61 +1,71 @@
 /**
- * 一帧 GPU 耗时的测量器。
+ * Measures per-frame GPU time.
  *
- * 优先用 timestamp-query：在命令流里打 3 个时间戳（帧开始 / 采样结束 / 显示结束），
- * resolve 后异步读回。时间戳是 GPU 自己的时钟，不受 vsync 量化影响 —— 用
- * performance.now() 包 submit() 只能测到 CPU 提交，用 rAF 帧间隔又会卡在
- * 16.7/33.3ms 的台阶上，都不足以驱动采样预算。
+ * Prefers timestamp-query: writes 3 timestamps into the command stream (frame start /
+ * sampling end / display end) and reads them back asynchronously after resolve.
+ * Timestamps come from the GPU's own clock and are not quantized by vsync — wrapping
+ * submit() with performance.now() only measures CPU submission, while rAF frame
+ * intervals snap to 16.7/33.3 ms steps, and neither can drive the sampling budget.
  *
- * 设备不支持 timestamp-query 时退回 queue.onSubmittedWorkDone()：
- * 从提交到 GPU 执行完的墙钟时间，含少量驱动开销，但足够让控制器收敛。
+ * When the device does not support timestamp-query, falls back to
+ * queue.onSubmittedWorkDone(): wall-clock time from submission to GPU completion,
+ * including a little driver overhead, but enough for the controller to converge.
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * The file has two layers: contract (all exports) and implementation (no exports);
+ * see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ═════════════════ Contract layer (exports) ══════════════════
 
 /**
- * GpuTimer 的类绑定：构造时探测设备能力，能写时间戳就走 timestamp-query
- * 链路，否则退回 onSubmittedWorkDone。
+ * GpuTimer class binding: probes device capabilities at construction and uses the
+ * timestamp-query path when timestamps can be written, otherwise falls back to
+ * onSubmittedWorkDone.
  *
- * 此处只有声明，赋值在实现层。
+ * This is only a declaration; the assignment is in the implementation layer.
  */
 export let GpuTimer: {
     new (device: GPUDevice): GpuTimer;
 };
 
-/** 一帧 GPU 耗时的测量器（timestamp-query 优先，onSubmittedWorkDone 退回）。 */
+/** Per-frame GPU time measurer (timestamp-query preferred, onSubmittedWorkDone fallback). */
 export interface GpuTimer {
-    /** 每次测量完成时回调（异步，通常比提交晚 1–2 帧）。 */
+    /** Called when each measurement completes (async, usually 1–2 frames after submission). */
     onMeasure?: (samplingMs: number, totalMs: number, dispatch: number) => void;
 
     /**
-     * 还能不能再提交一帧。
+     * Whether another frame can be submitted.
      *
-     * 提交得比 GPU 跑得快，队列就越积越深：槽位全被占满之后测量被丢弃，
-     * 控制器收不到任何新数据、采样量冻住不动，直到队列排空才缓过来。
+     * Submitting faster than the GPU runs deepens the queue: once all slots are
+     * full, measurements are dropped, the controller gets no new data, and the
+     * sample count freezes until the queue drains.
      *
-     * 上限是 2 而不是 1：只许一帧在途的话，提交要等上一帧的读回、再等下一个
-     * rAF，GPU 每帧空转最多半个刷新间隔 —— 采样量直接掉三成。2 帧在途
-     * 正好让 GPU 连轴转，而 3 个槽位永远留着一个空位，测量不断供。
+     * The limit is 2 rather than 1: with only one frame in flight, submission has
+     * to wait for the previous readback and then for the next rAF, leaving the GPU
+     * idle for up to half a refresh interval each frame — the sample count drops by
+     * 30%. Two frames in flight keep the GPU busy continuously, and with 3 slots
+     * there is always one free slot, so measurements never starve.
      */
     canSubmit(): boolean;
-    /** 帧开始（采样之前）。 */
+    /** Frame start (before sampling). */
     begin(encoder: GPUCommandEncoder): void;
-    /** 路径追踪（拷贝 + compute）结束。 */
+    /** End of path tracing (copy + compute). */
     afterSampling(encoder: GPUCommandEncoder): void;
-    /** 显示（blit）结束；同时 resolve 时间戳并排进读回队列。 */
+    /** End of display (blit); also resolves timestamps and queues the readback. */
     end(encoder: GPUCommandEncoder, dispatch: number): void;
-    /** submit 之后调用：开始读回（时间戳）或等待 GPU 完成（退回方案）。 */
+    /**
+     * Called after submit: starts the readback (timestamps) or waits for GPU
+     * completion (fallback).
+     */
     afterSubmit(): void;
     destroy(): void;
 }
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ════════════ Implementation layer (not exported) ═════════════
 
 /**
- * 规范里 GPUCommandEncoder.writeTimestamp() 已经是正式 API，但 @webgpu/types
- * 0.1.71 还没声明它，这里补一个局部接口。
+ * GPUCommandEncoder.writeTimestamp() is already a standard API, but @webgpu/types
+ * 0.1.71 does not declare it yet, so add a local interface here.
  */
 interface TimestampCommandEncoder extends GPUCommandEncoder {
     writeTimestamp(querySet: GPUQuerySet, queryIndex: number): void;
@@ -66,11 +76,12 @@ function writeTimestamp(encoder: GPUCommandEncoder, querySet: GPUQuerySet, index
 }
 
 /**
- * 设备是否真的能写时间戳。
+ * Whether the device can actually write timestamps.
  *
- * 只看 features 不够：有些实现（实验性的 Firefox WebGPU 等）会声明
- * timestamp-query 特性，却没有实现 encoder.writeTimestamp，调用直接抛
- * TypeError。以方法本身是否存在为准，缺了就整条链路退回 onSubmittedWorkDone。
+ * Checking features alone is not enough: some implementations (experimental Firefox
+ * WebGPU, etc.) declare the timestamp-query feature but do not implement
+ * encoder.writeTimestamp, and the call throws TypeError. Trust whether the method
+ * itself exists; if missing, the whole path falls back to onSubmittedWorkDone.
  */
 function supportsTimestamps(device: GPUDevice): boolean {
     if (!device.features.has('timestamp-query')) return false;
@@ -78,9 +89,9 @@ function supportsTimestamps(device: GPUDevice): boolean {
     return typeof proto?.writeTimestamp === 'function';
 }
 
-/** 允许同时在途的帧数：留一个读回槽位永远空着，测量就不会断供。 */
+/** Frames allowed in flight; one readback slot stays free so measurements never starve. */
 const MAX_IN_FLIGHT = 2;
-/** 读回槽位个数。比 MAX_IN_FLIGHT 多一个，是上面那条的前提。 */
+/** Readback slot count. One more than MAX_IN_FLIGHT, which the rule above relies on. */
 const SLOT_COUNT = 3;
 
 class GpuTimerImpl implements GpuTimer {
@@ -88,10 +99,10 @@ class GpuTimerImpl implements GpuTimer {
     private querySet: GPUQuerySet | null = null;
     private resolveBuf: GPUBuffer | null = null;
     private slots: Array<{ buf: GPUBuffer; busy: boolean }> = [];
-    /** 已提交、还没读回的帧数。 */
+    /** Frames submitted but not yet read back. */
     private inFlight = 0;
     private pending: { slot: { buf: GPUBuffer; busy: boolean }; dispatch: number } | null = null;
-    /** 退回方案用的 CPU 起点与当前帧采样量。 */
+    /** CPU start time and current-frame sample count for the fallback path. */
     private cpuStart = 0;
     private fallbackDispatch = 0;
     private fallbackBusy = false;
@@ -212,5 +223,5 @@ class GpuTimerImpl implements GpuTimer {
     }
 }
 
-/** 契约层类绑定的赋值。 */
+/** Assignment of the contract-layer class binding. */
 GpuTimer = GpuTimerImpl;

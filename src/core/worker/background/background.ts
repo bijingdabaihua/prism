@@ -1,93 +1,117 @@
 import type { Image } from '../model/image';
 
 /**
- * 环境光照的 GPU 侧。
+ * GPU side of environment lighting.
  *
- * 只认 Image IR —— 不知道 URL，也不知道源文件是 .exr 还是 .hdr。
- * 产物是一张带 mip 链的 envMap 纹理（光线 miss 时直接取）和一份亮度 CDF
- * （环境 NEE 按亮度采样方向，避免萤火虫）。
+ * Understands only the Image IR: it knows neither a URL nor whether the source
+ * file is .exr or .hdr. Its outputs are an envMap texture with a mip chain
+ * (sampled directly when a ray misses) and a luminance CDF (environment NEE
+ * samples directions by brightness, avoiding fireflies).
  *
- * 为什么要 mip：路径追踪没有屏幕空间导数，`textureSample` 用不了，只能显式给
- * LOD。没有 mip 时每个逃进环境的光线只取一个纹素 —— 光滑表面的反射瓣落在这张
- * 2k 点云上，相邻样本在亮暗之间跳，表现是釉面上一层彩色颗粒。mip 链让 BSDF
- * 侧能按粗糙度取一个已经按瓣宽平均过的值（见 shade.wgsl 的 env_radiance_rough）。
+ * Why mips: path tracing has no screen-space derivatives, so `textureSample`
+ * is unavailable and LOD must be supplied explicitly. Without mips, every ray
+ * escaping into the environment fetches a single texel: a smooth surface's
+ * reflection lobe lands on this 2k point cloud, adjacent samples jump between
+ * bright and dark, and the result is a layer of colored grain over the glaze.
+ * The mip chain lets the BSDF side fetch a value already averaged over the lobe
+ * width according to roughness (see env_radiance_rough in shade.wgsl).
  *
- * 格式用 rgba16float 而不是 rgba32float：WebGPU 里 f16 默认可过滤，f32 的可
- * 过滤性是要单独申请的设备特性。半浮点的范围（65504）对 HDRI 绰绰有余，太阳
- * 也就几千。
+ * The format is rgba16float rather than rgba32float: in WebGPU f16 is filterable
+ * by default, while f32 filtering is a device feature that must be requested
+ * separately. Half-float's range (65504) is more than enough for HDRI, where the
+ * sun is only a few thousand.
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * The file has two layers: contract (all exports) and implementation (no
+ * exports); see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ═════════════════ Contract layer (exports) ══════════════════
 
 /**
- * Background 的类绑定：构造时只持有 device —— 没有「没有环境图」的占位状态，
- * setImage 之前就是还没有。
+ * Class binding for Background: construction only holds the device; there is no
+ * placeholder "no environment map" state, it simply does not exist before setImage.
  *
- * 此处只有声明，赋值在实现层。
+ * Declaration only; the assignment lives in the implementation layer.
  */
 export let Background: {
     new (device: GPUDevice): Background;
 };
 
 /**
- * 环境光照的 GPU 侧：一张带 mip 链的 envMap 纹理 + 一份亮度 CDF。
+ * GPU side of environment lighting: an envMap texture with a mip chain plus a
+ * luminance CDF.
  *
- * setImage() 只负责换源：每调一次换一张环境图（门面的 background.setImage
- * 就是这么用的），并回到原图方向。纹理和 CDF 在这一次里直接建好 ——
- * 没有「待上传」状态。
+ * setImage() only swaps the source: each call swaps in one environment map
+ * (that is how the facade's background.setImage is used) and resets to the
+ * original orientation. The texture and CDF are built right there in the same
+ * call; there is no "pending upload" state.
  *
- * 环境图绕 +y 的旋转由 setRotation() 单独负责：它从保留的原图重新转图、
- * 建纹理和 CDF，采样与 pdf 仍然自洽。转过的图进 GPU 之前不会留下任何来源信息。
+ * Rotation of the environment map around +y is handled separately by
+ * setRotation(): it rotates the retained source image, rebuilds the texture and
+ * CDF, and sampling and pdf stay consistent. A rotated image leaves no source
+ * information before it enters the GPU.
  *
- * 没有「没有环境图」这个状态：构造时也不预留占位图，setImage 之前就是还没有。
- * `hasEnvironment()` 是 PathTracePass 的出图条件之一 —— 另一条是 Model 编译完。
+ * There is no "no environment map" state: construction does not reserve a
+ * placeholder either, the map simply does not exist before setImage.
+ * `hasEnvironment()` is one of PathTracePass's conditions for producing a
+ * frame; the other is that Model has finished compiling.
  *
- * 换图之后 `version` 会变：PathTracePass 每帧对比它，变了就重建 bind group、
- * 清零累积 —— 旧纹理已经被 destroy，不能再被任何在途的 bind group 引用。
+ * After a swap, `version` changes: PathTracePass compares it every frame and,
+ * when it differs, rebuilds the bind group and clears accumulation. The old
+ * texture has already been destroyed and must not be referenced by any
+ * in-flight bind group.
  */
 export interface Background {
     /**
-     * 设置环境图 —— 只换源，并回到原图方向。
+     * Sets the environment map: swaps the source and resets to the original orientation.
      *
-     * 原图会留在内存里给 setRotation 用 —— 环境图只有一张，这份解码后的
-     * 浮点数据换来运行时改朝向，不用重新解码文件。
+     * The source image stays in memory for setRotation. There is only one
+     * environment map, and this decoded float data buys runtime orientation
+     * changes without re-decoding the file.
      */
     setImage(image: Image): void;
     /**
-     * 旋转当前环境图：原图不动，按新角度重新建纹理和亮度 CDF。
+     * Rotates the current environment map: the source stays put, and the texture
+     * and luminance CDF are rebuilt at the new angle.
      *
-     * 需要先 setImage；改完 version 会变，累积清零。角度是绕 +y 的弧度，
-     * 与场景数据里的 `envRotation` 同一套定义。
+     * Requires setImage first. After the change version changes and accumulation
+     * clears. The angle is in radians around +y, sharing the same definition as
+     * `envRotation` in scene data.
      */
     setRotation(rotation: number): void;
     /**
-     * 是否已经有一张环境图可用。
+     * Whether an environment map is available yet.
      *
-     * 场景在引擎创建之后才异步加载，那之前的帧没有任何光照 —— bind group
-     * 建不起来，PathTracePass 用这个判断要不要跳过这一帧。
+     * Scenes load asynchronously after the engine is created, and frames before
+     * that have no lighting: the bind group cannot be built, so PathTracePass
+     * uses this to decide whether to skip the frame.
      */
     hasEnvironment(): boolean;
-    /** 当前环境图的版本号 —— 变了就说明纹理 / CDF 已经换掉。 */
+    /**
+     * Version number of the current environment map: a change means the
+     * texture / CDF were swapped.
+     */
     version(): number;
     envMapView(): GPUTextureView;
     envDistributionBuffer(): GPUBuffer;
     destroy(): void;
 }
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ════════════ Implementation layer (not exported) ═════════════
 
 class BackgroundImpl implements Background {
     private envMapTex: GPUTexture | null = null;
     private envMapTexView: GPUTextureView | null = null;
-    /** 亮度 CDF（打包布局见 buildEnvDistribution），供环境 NEE 使用。 */
+    /** Luminance CDF (see buildEnvDistribution for the packed layout), used by environment NEE. */
     private envDistBuf: GPUBuffer | null = null;
-    /** 未旋转的原图，供 setRotation 重编译；setImage 之前为 null。 */
+    /** Unrotated source image, kept for setRotation to rebuild from; null before setImage. */
     private source: Image | null = null;
-    /** 当前原图绕 +y 的旋转（弧度）。 */
+    /** Current rotation of the source image around +y (radians). */
     private rotation = 0;
-    /** 每换一次图 / 转一次 +1。渲染管线据此重建 bind group、清零累积。 */
+    /**
+     * Incremented on every image swap / rotation. The render pipeline uses it to
+     * rebuild the bind group and clear accumulation.
+     */
     private versionCounter = 0;
     private readonly device: GPUDevice;
 
@@ -104,7 +128,7 @@ class BackgroundImpl implements Background {
 
     public setRotation(rotation: number): void {
         if (!this.source) {
-            throw new Error('Background: 还没有环境图，先 setImage');
+            throw new Error('Background: no environment map yet, call setImage first');
         }
         if (rotation === this.rotation) return;
         this.upload(this.source, rotation);
@@ -138,7 +162,7 @@ class BackgroundImpl implements Background {
         this.rotation = 0;
     }
 
-    /** 放掉当前的纹理和 CDF，回到「还没有环境图」。 */
+    /** Releases the current texture and CDF, returning to "no environment map yet". */
     private release(): void {
         this.envMapTex?.destroy();
         this.envMapTexView = null;
@@ -147,10 +171,14 @@ class BackgroundImpl implements Background {
         this.envDistBuf = null;
     }
 
-    /** 原图 + 角度 → 旋转 → 建 GPU 资源。失败时旧的环境光原样保留。 */
+    /**
+     * Source + angle → rotate → build GPU resources. On failure the old
+     * environment lighting is left intact.
+     */
     private upload(image: Image, rotation: number): void {
         const env = rotation === 0 ? image : rotateEquirect(image, rotation);
-        // 先把新的建好、再换掉旧的：构建失败时旧的环境光还能用。
+        // Build the new resources first, then swap out the old ones: on failure
+        // the old environment lighting still works.
         const { tex, view, dist } = this.build(env);
         this.release();
         this.envMapTex = tex;
@@ -162,8 +190,8 @@ class BackgroundImpl implements Background {
     }
 
     private build(image: Image): EnvResources {
-        // 存线性 HDR：Image.data 本身就是线性 RGB，直接上传，不做任何色调映射。
-        // 显示编码只在 DisplayPass 的最后一步发生。
+        // Store linear HDR: Image.data is already linear RGB, so upload it as-is
+        // with no tone mapping. Display encoding happens only in DisplayPass's final step.
         const mips = buildEnvMips(image);
         const tex = this.createTex(image.width, image.height, mips.length);
         try {
@@ -172,13 +200,13 @@ class BackgroundImpl implements Background {
             const dist = this.createDistribution(image);
             return { tex, view, dist };
         } catch (err) {
-            // 构建到一半失败时清掉已分配的资源，避免泄漏。
+            // Clean up allocated resources if the build fails partway, avoiding a leak.
             tex.destroy();
             throw err;
         }
     }
 
-    /** 亮度 CDF → storage buffer（shader 里按 array<f32> 直接用）。 */
+    /** Luminance CDF → storage buffer (used directly as array<f32> in the shader). */
     private createDistribution(image: Image): GPUBuffer {
         const { data } = buildEnvDistribution(image);
         const buffer = this.device.createBuffer({
@@ -208,8 +236,9 @@ class BackgroundImpl implements Background {
     private writeTex(tex: GPUTexture, mips: EnvMip[]): void {
         for (let level = 0; level < mips.length; level++) {
             const { width, height, data } = mips[level]!;
-            const tightRow = width * 8; // rgba16float：8 字节一个纹素
-            // bytesPerRow 必须 256 字节对齐，1×1、2×2 这些尾部 mip 行宽不够要补。
+            const tightRow = width * 8; // rgba16float: 8 bytes per texel
+            // bytesPerRow must be 256-byte aligned; trailing mips like 1×1 and
+            // 2×2 need padding when the row is too short.
             const bytesPerRow = Math.ceil(tightRow / 256) * 256;
             const tight = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
             let source = tight;
@@ -229,17 +258,20 @@ class BackgroundImpl implements Background {
     }
 }
 
-/** 契约层类绑定的赋值。 */
+/** Assignment of the contract-layer class binding. */
 Background = BackgroundImpl;
 
 /**
- * 把环境图绕 +y 轴转 angle 弧度：等距柱状图沿经度整体平移。
+ * Rotates the environment map by angle radians around the +y axis: an equirect
+ * map shifts as a whole along longitude.
  *
- * 渲染器的方位角约定是 φ = atan2(z, x)，φ = 0 指向 +x、向 +z 增大。
- * 正 angle 会让图里的特征（太阳、地平线上的亮区）向 φ 减小的方向移动。
+ * The renderer's azimuth convention is φ = atan2(z, x), with φ = 0 pointing to
+ * +x and increasing toward +z. A positive angle moves features in the map (the
+ * sun, bright patches on the horizon) toward decreasing φ.
  *
- * 这是给场景作者对齐太阳用的：房间是正南正北的，HDR 的太阳未必。
- * 亮度 CDF 由旋转后的图重新构建，采样和 pdf 仍然自洽，不引入任何偏差。
+ * This lets scene authors align the sun: a room may face due south/north, but
+ * the HDR sun may not. The luminance CDF is rebuilt from the rotated image, so
+ * sampling and pdf stay consistent with no added bias.
  */
 function rotateEquirect(image: Image, angle: number): Image {
     if (image.layout !== 'equirect') {
@@ -257,7 +289,7 @@ function rotateEquirect(image: Image, angle: number): Image {
     const split = k * 3;
     for (let y = 0; y < height; y++) {
         const row = y * rowFloats;
-        // 输出列 x 取输入列 x + k
+        // Output column x takes input column x + k
         out.set(src.subarray(row + split, row + rowFloats), row);
         out.set(src.subarray(row, row + split), row + rowFloats - split);
     }
@@ -270,7 +302,7 @@ interface EnvResources {
     dist: GPUBuffer;
 }
 
-/** 一级 mip：rgba16float，行紧排（补对齐在 writeTex 里做）。 */
+/** One mip level: rgba16float with tightly packed rows (padding is done in writeTex). */
 interface EnvMip {
     width: number;
     height: number;
@@ -278,14 +310,17 @@ interface EnvMip {
 }
 
 /**
- * 环境图 mip 链：逐级 2×2 盒式降采样，直到 1×1。
+ * Environment-map mip chain: successive 2×2 box downsampling until 1×1.
  *
- * 等距柱状投影里第 y 行覆盖的立体角 ∝ sinθ，所以四个 tap 各按自己那一行的
- * sinθ 加权 —— 直接平均会让两极的行被多算，反射里的天顶会偏亮。
- * 横向是等角的，直接环绕取两个（x 方向越界就是绕回另一侧，不是夹边）。
+ * In an equirect projection the solid angle covered by row y is ∝ sinθ, so each
+ * of the four taps is weighted by its own row's sinθ. A plain average would
+ * overcount the polar rows and make the zenith too bright in reflections.
+ * Longitude is uniform, so the two horizontal taps wrap directly (going out of
+ * bounds in x wraps to the other side, not clamped).
  *
- * 一段 mip 的模糊半径对应 BSDF 瓣宽，查表公式见 shade.wgsl 的
- * env_radiance_rough —— 这里只负责把图按正确的面积权重铺好。
+ * Each mip's blur radius corresponds to the BSDF lobe width; see
+ * env_radiance_rough in shade.wgsl for the lookup formula. This function only
+ * lays out the image with the correct area weights.
  */
 function buildEnvMips(image: Image): EnvMip[] {
     let width = image.width;
@@ -334,7 +369,7 @@ function buildEnvMips(image: Image): EnvMip[] {
     return mips;
 }
 
-/** 线性 RGB → rgba16float（alpha 补 1）。 */
+/** Linear RGB → rgba16float (alpha padded to 1). */
 function encodeLevel(rgb: Float32Array, width: number, height: number): EnvMip {
     const data = new Uint16Array(width * height * 4);
     for (let i = 0, n = width * height; i < n; i++) {
@@ -347,10 +382,11 @@ function encodeLevel(rgb: Float32Array, width: number, height: number): EnvMip {
 }
 
 /**
- * float32 → float16（就近舍入）。
+ * float32 → float16 (round to nearest).
  *
- * 先夹到半浮点的有限范围：环境图里的太阳偶尔会超过 65504，转成 Inf 会把
- * 整条路径的辐射度污染成 NaN。
+ * Clamp to the half-float finite range first: the sun in an environment map
+ * occasionally exceeds 65504, and turning it into Inf would poison the whole
+ * path's radiance into NaN.
  */
 const halfBits = new Uint32Array(1);
 const halfValue = new Float32Array(halfBits.buffer);
@@ -377,27 +413,30 @@ function toHalf(value: number): number {
     return sign | (e << 10) | m;
 }
 
-// 亮度 CDF
+// Luminance CDF
 
 /**
- * 环境图的重要性采样分布 —— 纯 CPU，不碰 GPU。
+ * Importance-sampling distribution for the environment map: pure CPU, no GPU.
  *
- * 光线打不中场景时直接取环境图是正确但有巨大方差的：太阳只占环境图
- * 几个像素，余弦采样的光子偶尔命中它，贡献被 pdf 放大成萤火虫。
- * 这里为环境方向预先烘焙一张二维 CDF，让 NEE 能按亮度直接采到太阳。
+ * Sampling the environment directly when a ray misses the scene is correct but
+ * has enormous variance: the sun occupies only a few pixels of the environment
+ * map, cosine-sampled photons hit it only occasionally, and the contribution is
+ * blown up by the pdf into fireflies. This pre-bakes a 2D CDF over environment
+ * directions so NEE can sample the sun directly by brightness.
  *
- * 采样分布：像素权重 = 亮度 × sinθ（等距柱状投影里每行覆盖的立体角
- * 正比于 sinθ）。行内归一化后，边缘 CDF 再按行权重重归一化。
+ * Sampling distribution: pixel weight = luminance × sinθ (in an equirect
+ * projection the solid angle covered by each row is proportional to sinθ).
+ * After per-row normalization, the marginal CDF is renormalized by row weights.
  *
- * 打包布局（单个 Float32Array，直接对应 shader 里的 array<f32>）：
+ * Packed layout (a single Float32Array, matching array<f32> in the shader):
  *
- *   [0, height*(width+1))        条件 CDF，每行 width+1 个，行内归一化到 1
- *   [height*(width+1), +height+1) 边缘 CDF，归一化到 1
+ *   [0, height*(width+1))         conditional CDF, width+1 per row, normalized to 1 within the row
+ *   [height*(width+1), +height+1) marginal CDF, normalized to 1
  */
 interface EnvDistribution {
     readonly width: number;
     readonly height: number;
-    /** 边缘 CDF 在 data 中的起始下标 = height * (width + 1) */
+    /** Start index of the marginal CDF in data = height * (width + 1) */
     readonly marginalOffset: number;
     readonly data: Float32Array;
 }
@@ -414,8 +453,9 @@ function buildEnvDistribution(image: Image): EnvDistribution {
     let total = 0;
 
     for (let y = 0; y < h; y++) {
-        // 图像第 0 行是顶部，uv.y = (y + 0.5) / h；shader 里 uv.y = 1 - theta/π，
-        // 所以这一行的像素中心对应 theta = π * (1 - (y + 0.5) / h)。
+        // Row 0 of the image is the top, uv.y = (y + 0.5) / h; in the shader
+        // uv.y = 1 - theta/π, so this row's pixel centers correspond to
+        // theta = π * (1 - (y + 0.5) / h).
         const theta = Math.PI * (1 - (y + 0.5) / h);
         const sinTheta = Math.max(Math.sin(theta), 0);
         const base = y * stride;
@@ -431,8 +471,8 @@ function buildEnvDistribution(image: Image): EnvDistribution {
     }
 
     if (total <= 0) {
-        // 全黑环境：没有可采样的方向，退化成均匀分布（pdf 仍然是有限值，
-        // 不会让 NEE 除零）。
+        // All-black environment: no direction to sample, so fall back to a
+        // uniform distribution (the pdf stays finite and NEE does not divide by zero).
         for (let y = 0; y < h; y++) {
             const base = y * stride;
             for (let x = 0; x < w; x++) data[base + x + 1] = x + 1;
@@ -441,8 +481,9 @@ function buildEnvDistribution(image: Image): EnvDistribution {
         total = h;
     }
 
-    // 行内归一化到 1。全零行（纯黑）的权重为 0，边缘 CDF 永远不会选中它，
-    // 但归一化时仍要避免 0 * Infinity = NaN。
+    // Normalize each row to 1. All-zero rows (pure black) get weight 0, so the
+    // marginal CDF never selects them, but normalization must still avoid
+    // 0 * Infinity = NaN.
     for (let y = 0; y < h; y++) {
         const base = y * stride;
         const rw = rowWeights[y];

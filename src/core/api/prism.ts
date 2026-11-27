@@ -1,9 +1,10 @@
 /**
- * core 的公共面：门面 + 主线程 RPC + 消息协议 + 错误。
+ * The public surface of core: facade + main-thread RPC + message protocol + errors.
  *
- * 三个句柄的契约和主线程实现分别在 `camera.ts` / `background.ts` /
- * `model.ts`；本文件只负责装配它们。主线程只从 `core/prism`
- * 拿东西；Worker 只从同一文件做纯类型导入，编译后不留下运行时依赖。
+ * The contracts and main-thread implementations of the three handles live in `camera.ts` /
+ * `background.ts` / `model.ts`; this file only assembles them. The main thread imports only
+ * from `core/prism`; the Worker performs pure type imports from the same file, leaving no
+ * runtime dependency after compilation.
  */
 
 import type { BackgroundHandle, BackgroundRequest } from './background';
@@ -18,35 +19,38 @@ export type { CameraHandle, CameraView, ViewportSize } from './camera';
 export type { InstancePlacement, ModelHandle } from './model';
 
 /**
- * 公开契约
+ * Public contract
  *
- * 以下类型、接口和门面签名是对外 API。修改前先确认调用方影响；
- * 具体实现从本文件的「实现」一节开始。
+ * The types, interfaces and facade signature below are the external API. Check caller impact
+ * before changing; the concrete implementation starts at the "Implementation" section of this file.
  */
 
 /**
- * 门面契约（实例侧）。
+ * Facade contract (instance side).
  *
- * 创建入口是 `Prism.create()`；实例只暴露三个只读句柄和 `dispose()`。
- * 三个句柄的契约分别在 `camera.ts` / `background.ts` / `model.ts`。
+ * The factory is `Prism.create()`; an instance exposes only three read-only handles and
+ * `dispose()`. The handle contracts live in `camera.ts` / `background.ts` / `model.ts`.
  */
 export interface Prism {
-    /** 观察者：机位控制。 */
+    /** Observer: camera control. */
     readonly camera: CameraHandle;
-    /** 环境光照。 */
+    /** Environment lighting. */
     readonly background: BackgroundHandle;
-    /** 场景几何：glTF 字节 + 外部构造的 Instance 两个入口。 */
+    /** Scene geometry: glTF bytes and externally built Instances, two entry points. */
     readonly model: ModelHandle;
-    /** 释放 Worker 和 GPU 设备；重复调用无副作用。 */
+    /** Releases the Worker and the GPU device; repeated calls have no effect. */
     dispose(): void;
 }
 
-/** 门面工厂：`Prism.create()` 的签名。 */
+/** Facade factory: the signature of `Prism.create()`. */
 export interface PrismFactory {
     create(): Promise<Prism>;
 }
 
-/** 这台机器跑不了 WebGPU —— 调用方据此走降级页，而不是错误态。 */
+/**
+ * This machine cannot run WebGPU — the caller uses this to go to the fallback page,
+ * not an error state.
+ */
 export class PrismUnsupportedError extends Error {
     constructor(message = 'WebGPU is not available in this browser') {
         super(message);
@@ -55,22 +59,24 @@ export class PrismUnsupportedError extends Error {
 }
 
 /**
- * 实现
+ * Implementation
  *
- * 以下内容不属于公开契约：内部消息协议、门面的具体实现和主线程 RPC。
+ * The following is not part of the public contract: internal message protocol, the concrete
+ * facade implementation and main-thread RPC.
  */
 
-/** Worker 侧机位命令类型；由 camera.ts 的实现段定义。 */
+/** Camera command types on the Worker side; defined by the implementation section of camera.ts. */
 export type { CameraCommand } from './camera';
 
 /**
- * 主线程 → Worker。
+ * Main thread → Worker.
  *
- * 两类消息：写操作（机位命令）没有 id；有返回值的调用带自增 id，
- * Worker 用 result / failure 回执。「跑不了 WebGPU」单独一种回执，
- * 主线程据此转成 PrismUnsupportedError。
+ * Two kinds of messages: write operations (camera commands) have no id; calls with a return
+ * value carry an auto-incrementing id, and the Worker replies with result / failure.
+ * "Cannot run WebGPU" is a separate reply kind, which the main thread turns into
+ * PrismUnsupportedError.
  *
- * 四个句柄的消息形状由各自的文件定义，这里只做汇总。
+ * The message shapes of the four handles are defined in their own files; this is only the union.
  */
 export type WorkerRequest =
     | { type: 'init'; id: number }
@@ -78,38 +84,41 @@ export type WorkerRequest =
     | BackgroundRequest
     | ModelRequest;
 
-/** Worker → 主线程。 */
+/** Worker → main thread. */
 export type WorkerResponse =
-    /** 成功了：value 是这次调用的返回值（void 调用不带）。 */
+    /** Success: value is this call's return value (absent for void calls). */
     | { type: 'result'; id: number; value?: unknown }
-    /** 这次调用失败了。 */
+    /** The call failed. */
     | { type: 'failure'; id: number; message: string }
-    /** 这台机器跑不了 WebGPU。 */
+    /** This machine cannot run WebGPU. */
     | { type: 'unsupported'; id: number; message: string }
-    /** 一帧画面（listen 的推送，没有 id）。 */
+    /** One frame (pushed by listen, no id). */
     | { type: 'frame'; bitmap: ImageBitmap };
 
 /**
- * 门面：起 Worker、装配三个句柄、管生命周期。
+ * Facade: starts the Worker, assembles the three handles and manages the lifecycle.
  *
- * 三个句柄的契约和主线程实现分别在 camera.ts / background.ts / model.ts；
- * 这里只负责创建和持有。实际渲染跑在 Worker 里 —— 一个实例一个
- * Worker、一个独立 GPUDevice，主线程从头到尾不碰 GPU。
+ * The contracts and main-thread implementations of the three handles live in camera.ts /
+ * background.ts / model.ts; this file only creates and holds them. Actual rendering runs in
+ * the Worker — one instance per Worker and per separate GPUDevice; the main thread never
+ * touches the GPU.
  *
- * 业务层只认识这个门面。画面是相机的输出：`camera.listen(interval, cb)`
- * 每 interval 毫秒把一帧 ImageBitmap 推回主线程，worker 内部自己持有画布。
+ * The app layer knows only this facade. The frame is the camera's output:
+ * `camera.listen(interval, cb)` pushes one ImageBitmap back to the main thread every interval
+ * milliseconds; the worker owns the canvas internally.
  */
 class PrismImpl implements Prism {
     /**
-     * 异步工厂：一次调用 = 一个 Worker = 一个独立 GPUDevice。
+     * Async factory: one call = one Worker = one separate GPUDevice.
      *
-     * 主线程先看一眼 navigator.gpu —— 没有就连 Worker 都不起，直接拒绝。
-     * 这一眼只说明「浏览器有这个 API」，不保证真能跑：requestAdapter() 在
-     * Worker 里仍可能返回 null（驱动进黑名单、虚拟机、关了硬件加速），
-     * 那种情况同样以 PrismUnsupportedError 拒绝 —— 消息由 Worker 报回来。
+     * The main thread first checks navigator.gpu — if absent, it does not even start the Worker
+     * and rejects immediately. This check only means "the browser has this API"; it does not
+     * guarantee it works: requestAdapter() in the Worker may still return null (driver
+     * blocklisted, VM, hardware acceleration off), and that case is also rejected with
+     * PrismUnsupportedError — the message comes back from the Worker.
      *
-     * 不接画布：Worker 内部自建 OffscreenCanvas，画面通过
-     * `camera.listen()` 以 ImageBitmap 推回来 —— 主线程不碰 GPU。
+     * No canvas is passed in: the Worker creates its own OffscreenCanvas and pushes frames back
+     * as ImageBitmap through `camera.listen()` — the main thread never touches the GPU.
      */
     public static async create(): Promise<Prism> {
         if (!navigator.gpu) {
@@ -122,10 +131,10 @@ class PrismImpl implements Prism {
             await withTimeout(
                 rpc.init(),
                 READY_TIMEOUT_MS,
-                `Prism.create: Worker 未在 ${READY_TIMEOUT_MS} ms 内就绪`,
+                `Prism.create: Worker did not become ready within ${READY_TIMEOUT_MS} ms`,
             );
         } catch (err) {
-            // 半途失败的 Worker 不能留着：它可能已经占着设备了
+            // A Worker that failed midway cannot be kept around: it may already hold the device
             rpc.dispose();
             worker.terminate();
             throw err;
@@ -133,11 +142,11 @@ class PrismImpl implements Prism {
         return new PrismImpl(worker, rpc);
     }
 
-    /** 观察者：机位控制。 */
+    /** Observer: camera control. */
     public readonly camera: CameraHandle;
-    /** 环境光照。 */
+    /** Environment lighting. */
     public readonly background: BackgroundHandle;
-    /** 场景几何：glTF 字节 + 外部构造的 Instance 两个入口。 */
+    /** Scene geometry: glTF bytes and externally built Instances, two entry points. */
     public readonly model: ModelHandle;
     private disposed = false;
     private readonly rpc: RpcClient;
@@ -153,10 +162,11 @@ class PrismImpl implements Prism {
     }
 
     /**
-     * 释放这个实例的 Worker 和 GPU 设备。
+     * Releases this instance's Worker and GPU device.
      *
-     * 实例独占一个 Worker 和一个 GPUDevice，dispose 之后所有句柄失效；
-     * 重复调用无副作用。不 dispose 就等于一直占着一个 Worker 和一份显存。
+     * The instance owns one Worker and one GPUDevice; after dispose all handles are invalid,
+     * and repeated calls have no effect. Not calling dispose leaves a Worker and a chunk of
+     * VRAM occupied indefinitely.
      */
     public dispose(): void {
         if (this.disposed) return;
@@ -167,25 +177,28 @@ class PrismImpl implements Prism {
 }
 
 /**
- * 导出的门面工厂：值就是 PrismImpl，外部只能通过 `Prism.create()` 创建。
- * 保留构造函数值是为了 `instanceof` 仍然可用；实现类本身不单独导出。
+ * Exported facade factory: the value is PrismImpl; externally, instances can only be created
+ * through `Prism.create()`. The constructor value is kept so `instanceof` still works; the
+ * implementation class itself is not exported separately.
  */
 export const Prism: PrismFactory & typeof PrismImpl = PrismImpl;
 
 /**
- * 主线程这一侧的 RPC：发消息、接回执。
+ * RPC on the main-thread side: send messages, receive replies.
  *
- * 有返回值的调用带一个自增 id；写操作（机位命令）是「发完不管」。
- * 同一个 MessagePort 上的消息是 FIFO —— 所以 `camera.set()` 之后立刻
- * `camera.listen()`，Worker 一定先看到机位，再开始推帧。
+ * Calls with a return value carry an auto-incrementing id; write operations (camera commands)
+ * are fire-and-forget. Messages on the same MessagePort are FIFO — so after `camera.set()`
+ * immediately followed by `camera.listen()`, the Worker always sees the camera placement first
+ * and then starts pushing frames.
  *
- * 三个句柄只通过各自的最小 RPC 接口使用它：该发消息的发消息、该发请求的
- * 发请求，谁都不认识 Worker 里的实现。具体类本身不导出。
+ * The three handles use it only through their own minimal RPC interfaces: message senders send
+ * messages, request senders send requests, and none of them knows the Worker-side implementation.
+ * The concrete class itself is not exported.
  */
 class RpcClient {
     private nextId = 1;
     private closed = false;
-    /** listen 推回来的帧。同一时刻只服务一个监听者。 */
+    /** Frames pushed back by listen. Only one listener is served at a time. */
     private frameHandler: ((bitmap: ImageBitmap) => void) | null = null;
     private readonly pending = new Map<number, Pending>();
 
@@ -206,17 +219,17 @@ class RpcClient {
         });
     }
 
-    /** 谁在听帧。null = 没有监听者（收到的帧直接丢掉）。 */
+    /** Who is listening for frames. null = no listener (received frames are dropped). */
     public setFrameHandler(handler: ((bitmap: ImageBitmap) => void) | null): void {
         this.frameHandler = handler;
     }
 
-    /** 初始化：Worker 里建好设备。 */
+    /** Initialization: creates the device inside the Worker. */
     public init(): Promise<void> {
         return this.request<void>((id) => ({ type: 'init', id }));
     }
 
-    /** 有返回值的一次调用；build 拿 id 组消息。 */
+    /** One call with a return value; build receives the id and assembles the message. */
     public request<T>(build: (id: number) => WorkerRequest): Promise<T> {
         const id = this.nextId++;
         return new Promise<T>((resolve, reject) => {
@@ -230,18 +243,21 @@ class RpcClient {
         });
     }
 
-    /** 发完不管：机位命令 / listen 开关走这条，不等回执。 */
+    /**
+     * Fire-and-forget: camera commands and listen toggles go through here without waiting
+     * for a reply.
+     */
     public send(request: WorkerRequest): void {
-        if (this.closed) throw new Error('Prism 已经 dispose');
+        if (this.closed) throw new Error('Prism has been disposed');
         this.worker.postMessage(request);
     }
 
-    /** Worker 走了：还挂着的请求全部拒绝，之后的调用直接抛。 */
+    /** The Worker is gone: rejects all pending requests; later calls throw immediately. */
     public dispose(): void {
         this.closed = true;
         this.frameHandler = null;
         for (const pending of this.pending.values()) {
-            pending.reject(new Error('Prism 已经 dispose'));
+            pending.reject(new Error('Prism has been disposed'));
         }
         this.pending.clear();
     }
@@ -254,10 +270,13 @@ class RpcClient {
     }
 }
 
-/** Worker 建设备的上限。requestAdapter 自身有 8 s 超时，这里再兜一层。 */
+/**
+ * Upper bound for device creation in the Worker. requestAdapter has its own 8 s timeout;
+ * this adds another layer.
+ */
 const READY_TIMEOUT_MS = 15000;
 
-/** 给一个 Promise 加超时；超时之后迟到的回执会被 RpcClient 忽略。 */
+/** Adds a timeout to a Promise; replies that arrive late are ignored by RpcClient. */
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
     return new Promise<T>((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error(message)), ms);

@@ -3,42 +3,48 @@ import VS from './fullscreen-vertex.wgsl?raw';
 import FS from './fullscreen-fragment.wgsl?raw';
 
 /**
- * 显示 pass：把累加纹理 blit 到 canvas —— ACES、暗角、颗粒。
+ * Display pass: blits the accumulation texture to the canvas — ACES, vignette, grain.
  *
- * 输入是 fp32 累加器，不可过滤 —— 用 textureLoad 逐像素取值，不采样；
- * 显示尺寸和渲染尺寸一比一，本来也不需要插值。
+ * The input is an fp32 accumulator and is unfilterable — use textureLoad to fetch
+ * each pixel instead of sampling; the display size matches the render size one to
+ * one, so interpolation is not needed anyway.
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * The file has two layers: contract (all exports) and implementation (no exports);
+ * see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ═════════════════ Contract layer (exports) ══════════════════
 
 /**
- * DisplayPass 的类绑定：构造即编译 blit 管线。
+ * DisplayPass class binding: construction compiles the blit pipeline.
  *
- * 此处只有声明，赋值在实现层。
+ * This is only a declaration; the assignment is in the implementation layer.
  */
 export let DisplayPass: {
     new (context: RenderContext): DisplayPass;
 };
 
-/** 显示 pass：把累加纹理 blit 到 canvas —— ACES、暗角、颗粒。 */
+/** Display pass: blits the accumulation texture to the canvas — ACES, vignette, grain. */
 export interface DisplayPass {
     /**
-     * @param view   要显示的纹理（累加结果）
-     * @param version 上游重建纹理时递增；变化则丢弃所有缓存的 bind group
+     * @param view    Texture to display (the accumulation result)
+     * @param version Incremented when the upstream texture is rebuilt; a change
+     *                drops all cached bind groups
      */
     record(encoder: GPUCommandEncoder, view: GPUTextureView | null, version: number): void;
     destroy(): void;
 }
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ════════════ Implementation layer (not exported) ═════════════
 
 class DisplayPassImpl implements DisplayPass {
     private readonly context: RenderContext;
     private pipeline: GPURenderPipeline | null = null;
     private blitVersion = -1;
-    /** Blit bind groups keyed by radiance view — ping-pong 每帧在两张 view 间切换，每个版本正好 2 个缓存项。 */
+    /**
+     * Blit bind groups keyed by radiance view — ping-pong switches between the two
+     * views every frame, so each version has exactly 2 cache entries.
+     */
     private blitBindGroups = new Map<GPUTextureView, GPUBindGroup>();
     private readonly bgl: GPUBindGroupLayout;
 
@@ -85,7 +91,8 @@ class DisplayPassImpl implements DisplayPass {
             this.blitVersion = version;
         }
 
-        // 用 view 做键缓存：上游每帧在两张视图间切换时直接命中
+        // Cache keyed by view: hits directly while upstream alternates between two
+        // views each frame
         if (!view || !this.pipeline) return null;
 
         const cached = this.blitBindGroups.get(view);
@@ -115,5 +122,5 @@ class DisplayPassImpl implements DisplayPass {
     }
 }
 
-/** 契约层类绑定的赋值。 */
+/** Assignment of the contract-layer class binding. */
 DisplayPass = DisplayPassImpl;

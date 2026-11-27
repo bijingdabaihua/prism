@@ -2,12 +2,12 @@
 
 struct Uniforms {
   resolution: vec2<u32>,
-  frame_index: u32,      // 帧序号：只喂给 LDS，不参与累加平均
+  frame_index: u32,      // Frame index: feeds only LDS, not the running average
   max_bounces: u32,
-  // ── 部分采样 ──
-  dispatch_count: u32,   // 本帧调度的像素数（≤ pixel_count）
-  cursor: u32,           // 当前轮内已采样的像素数 [0, pixel_count)
-  sweep: u32,            // 已完成的整轮采样数（= 每个像素的样本数下界）
+  // ── Partial sampling ──
+  dispatch_count: u32,   // pixels dispatched this frame (≤ pixel_count)
+  cursor: u32,           // pixels sampled so far in the current sweep [0, pixel_count)
+  sweep: u32,            // completed full sweeps (= lower bound on each pixel's sample count)
   pixel_count: u32,      // width * height
   emission_scale: f32,
 }
@@ -17,9 +17,9 @@ struct CameraUniforms {
   camera_position: vec4<f32>,
   resolution: vec4<f32>,
   fov: f32,
-  // 入射光瞳半径（米）。0 = 针孔。
+  // Entrance pupil radius (meters). 0 = pinhole.
   aperture_radius: f32,
-  // 对焦距离（米，沿视线量）。0 = 无穷远。
+  // Focus distance (meters, measured along the view direction). 0 = infinity.
   focus_distance: f32,
 }
 
@@ -35,10 +35,10 @@ struct Instance {
 const epsilon = 1e-6;
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
-// TLAS + BLAS 合并节点表：[TLAS ...][BLAS ...]，每节点 8 float。
-// BLAS 的 node offset 在打包时已经加上 TLAS 长度（见 gpu/upload.ts）。
+// TLAS + BLAS merged node table: [TLAS ...][BLAS ...], 8 floats per node.
+// BLAS node offsets already include the TLAS length at packing time (see gpu/upload.ts).
 @group(0) @binding(2) var<storage, read> nodes: array<f32>;
-// 像素采样顺序：0..pixel_count-1 的随机排列（见 gpu/pixel-order.ts）。
+// Pixel sampling order: a random permutation of 0..pixel_count-1 (see gpu/pixel-order.ts).
 @group(0) @binding(3) var<storage, read> pixel_order: array<u32>;
 @group(0) @binding(4) var<storage, read> geometry: array<f32>;
 @group(0) @binding(5) var<storage, read> triangles: array<u32>;
@@ -47,17 +47,20 @@ const epsilon = 1e-6;
 @group(0) @binding(7) var<storage, read> instances: array<Instance>;
 @group(0) @binding(8) var out_texture: texture_storage_2d<rgba32float, write>;
 @group(0) @binding(9) var environment_texture: texture_2d<f32>;
-// 材质贴图：三个 texture_2d_array，材质表里存层号（见 TextureSet）。
+// Material textures: three texture_2d_array bindings; material slots store
+// layer indices (see TextureSet).
 @group(0) @binding(10) var albedo_texture: texture_2d_array<f32>;
 @group(0) @binding(11) var normal_texture: texture_2d_array<f32>;
 @group(0) @binding(12) var roughness_texture: texture_2d_array<f32>;
-// AO 图（R 通道）：只衰减间接光，照亮面的直射光不受影响，见 main.wgsl 的 beta。
+// AO map (R channel): attenuates indirect light only; direct light hitting the
+// surface is unaffected. See beta in main.wgsl.
 @group(0) @binding(19) var occlusion_texture: texture_2d_array<f32>;
 @group(0) @binding(17) var texture_sampler: sampler;
-// 环境图专用采样器：u 环绕、v 夹边。材质贴图那个是 repeat/repeat —— 环境图
-// 的 v 是极角，绕回去会从北极直接串到南极。
+// Environment-map sampler: u wraps, v clamps. The material texture sampler is
+// repeat/repeat — the environment's v is the polar angle, so wrapping goes
+// straight from the north pole to the south.
 @group(0) @binding(21) var environment_sampler: sampler;
 @group(0) @binding(13) var previous_accumulation_texture: texture_2d<f32>;
 @group(0) @binding(15) var<uniform> camera: CameraUniforms;
-// 环境亮度 CDF（布局见 engine/background.ts）
+// Environment luminance CDF (layout in engine/background.ts)
 @group(0) @binding(16) var<storage, read> env_distribution: array<f32>;

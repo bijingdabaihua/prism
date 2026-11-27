@@ -7,110 +7,125 @@ import { buildBvh, meshBlas } from './bvh';
 import { MaterialStore } from './material/material-store';
 
 /**
- * Model —— 场景的 GPU 形态：一组 buffer。
+ * Model — the GPU form of a scene: a set of buffers.
  *
- * 和 `instance.ts` 的 `Instance` 是同一样东西的两面：Instance 是 CPU 侧的
- * 描述，这里是它编译出来的 GPU 数据。render 层只认识这一面，不碰任何 CPU
- * 侧的几何对象。
+ * It is the other side of the same thing as `Instance` in `instance.ts`: Instance is the
+ * CPU-side description, and this is the GPU data compiled from it. The render layer only
+ * knows this side and never touches any CPU-side geometry object.
  *
- * 这里的 model 指「场景在 GPU 这边的模型」，不是 `assets/model/` 下那个
- * glTF 资产 —— 后者是 Mesh / Instance 的事。
+ * "Model" here means "the scene's model on the GPU side", not the glTF asset under
+ * `assets/model/` — that one belongs to Mesh / Instance.
  *
- * 每次 `add()` 都把「当前全部实例」重走一遍编译链，四个阶段都在实现层：
+ * Every `add()` runs the whole compilation chain again over "all current instances";
+ * the four stages all live in the implementation layer:
  *
- *   布局    mesh 去重，算出每个 mesh 的 BLAS / 顶点 / 三角形起始下标
- *   节点表  TLAS + 各 mesh 的 BLAS 拼成一张扁平 Float32Array，下标重基
- *   打包    顶点 / 三角形 / 实例各自铺成大数组，材质下标换成绝对槽位
- *   上传    建 buffer、写进去 —— 只搬运，不算数据
+ *   layout   dedupe meshes, compute each mesh's BLAS / vertex / triangle start index
+ *   nodes    TLAS + each mesh's BLAS combined into one flat Float32Array, indices rebased
+ *   pack     vertices / triangles / instances each laid out into one big array, material
+ *            indices rewritten to absolute slots
+ *   upload   create buffers and write into them — pure transport, no computation
  *
- * 外部一个一个加载实例时，后一次是在前一次的结果上追加；已经提交到 GPU 的
- * 旧 buffer 不能立刻 destroy，要等 `queue.onSubmittedWorkDone()` 之后再释放。
- * 这就是这里唯一比「一次编译」多出来的东西。
+ * When instances are loaded one at a time, each call appends to the previous result;
+ * old buffers already submitted to the GPU cannot be destroyed immediately, and must
+ * wait for `queue.onSubmittedWorkDone()`. That is the only thing this file does beyond
+ * a one-shot compile.
  *
- * 合成一个文件是因为它们只有这一条调用链：中间的数据结构（SceneOffsets /
- * SceneNodesData）没有第二个消费者，拆成三个模块只是让读者来回跳。
+ * Everything lives in one file because there is only one call chain: the intermediate
+ * data structures (SceneOffsets / SceneNodesData) have no other consumer, and splitting
+ * them into three modules would just make the reader jump around.
  *
- * 材质表由其内部按本次打包的结果维护，材质采样的图集归材质表持有（见 MaterialStore）。
+ * The material table is maintained internally from the result of each pack, and the
+ * material sampling atlas is owned by the material table (see MaterialStore).
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * The file has two layers: contract (all exports) and implementation (no exports);
+ * see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ══════════════════ Contract layer (exports) ═════════════════
 
 /**
- * Model 的类绑定：构造即建空的材质表，四个场景 buffer 要等首次 add() 才存在。
+ * Class binding for Model: construction creates an empty material table; the four scene
+ * buffers do not exist until the first add().
  *
- * 此处只有声明，赋值在实现层。
+ * Only declarations here; assignment is in the implementation layer.
  */
 export let Model: {
     new (device: GPUDevice): Model;
 };
 
-/** 场景的 GPU 形态 —— 一组 buffer，可追加；释放见 destroy()。 */
+/** The GPU form of a scene — a set of buffers, appendable; see destroy() for release. */
 export interface Model {
     /**
-     * TLAS + BLAS 合并节点 buffer：每节点 8 floats。
-     * 布局 [TLAS ...][BLAS ...]；TLAS 叶子编码 -(instanceID + 1)，
-     * BLAS 叶子编码 -(绝对三角形下标 + 1)。
+     * Combined TLAS + BLAS node buffer: 8 floats per node.
+     * Layout [TLAS ...][BLAS ...]; TLAS leaves encode -(instanceID + 1),
+     * BLAS leaves encode -(absolute triangle index + 1).
      */
     nodes: GPUBuffer;
-    /** 合并后的顶点数据，12 floats/vertex */
+    /** Combined vertex data, 12 floats/vertex */
     geometry: GPUBuffer;
-    /** 合并后的三角形，4 × u32（v0,v1,v2, 绝对材质槽位） */
+    /** Combined triangles, 4 × u32 (v0, v1, v2, absolute material slot) */
     triangles: GPUBuffer;
     emitters: GPUBuffer;
     emissionScale(): number;
     setEmissionScale(scale: number): void;
-    /** 实例表：36 floats/instance（blas_node_offset + transform + inv_transform） */
+    /** Instance table: 36 floats/instance (blas_node_offset + transform + inv_transform) */
     instanceBuffer: GPUBuffer;
 
-    /** 几何 / 材质是否已经编译上 GPU。PathTracePass 靠它决定能不能建 bind group。 */
+    /**
+     * Whether geometry / materials have been compiled to the GPU.
+     * PathTracePass uses it to decide whether bind groups can be created.
+     */
     ready(): boolean;
     /**
-     * 场景资源版本：每次成功追加加一。
+     * Scene resource version: incremented on every successful append.
      *
-     * 追加会换掉 nodes / geometry / triangles / instanceBuffer / 材质 SSBO，
-     * 已建的 bind group 随之过期，累积也要清零重来。
+     * Appending replaces nodes / geometry / triangles / instanceBuffer / the material
+     * SSBO; existing bind groups become stale with it, and accumulation must restart
+     * from zero.
      */
     version(): number;
     /**
-     * 向场景追加一组实例 —— 外部可以一个一个调用。
+     * Appends a group of instances to the scene — may be called repeatedly from outside.
      *
-     * 新实例先演化（位移贴图烘成真几何），再和已追加的实例合并，整体重走
-     * 一遍编译链。`add()` 之前这四个 buffer 都不存在 —— PathTracePass 等
-     * `ready()` 才建 bind group。
+     * New instances are evolved first (displacement maps baked into real geometry), then
+     * merged with the already-appended instances and run through the whole compilation
+     * chain again. Before `add()` none of the four buffers exists — PathTracePass waits
+     * for `ready()` before creating bind groups.
      *
-     * 先建新 buffer、再提交材质表、最后才换字段：中途失败时旧场景保持可用；
-     * 换下来的旧 buffer 等已提交的 GPU 工作完成后再 destroy。
+     * New buffers are built first, the material table is committed next, and fields are
+     * swapped last: on failure the old scene stays usable; retired old buffers are
+     * destroyed after the submitted GPU work completes.
      */
     add(insts: Instance[]): void;
-    /** 材质 SSBO，供 bind group 直接绑定。 */
+    /** Material SSBO, for direct binding in a bind group. */
     materialBuffer(): GPUBuffer;
-    /** 材质图集，供 bind group 直接绑定。 */
+    /** Material atlas, for direct binding in a bind group. */
     textures(): TextureSet;
     destroy(): void;
 }
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ═════════════ Implementation layer (not exported) ════════════
 
-// 布局
+// Layout
 
 /**
- * 场景资源的布局：几何 / BLAS / 三角形按 **mesh** 划分区域，不按 instance。
+ * Layout of scene resources: geometry / BLAS / triangles are divided by **mesh**, not by
+ * instance.
  *
- * 同一 mesh 的多个 instance 共享同一段几何与同一棵 BLAS，instance buffer 里
- * 只各存一份变换和指向同一区域的基址。这样实例化才真的省显存。
+ * Multiple instances of the same mesh share the same geometry region and the same BLAS;
+ * the instance buffer stores one transform each plus a base address pointing at the same
+ * region. This is what makes instancing actually save VRAM.
  */
 interface SceneOffsets {
-    /** 去重后的 mesh，按首次出现顺序 */
+    /** Deduplicated meshes, in order of first appearance */
     meshes: Mesh[];
-    /** 每个 mesh 的 BLAS 起始下标（float） */
+    /** BLAS start index for each mesh (float) */
     blas: number[];
-    /** 每个 mesh 的顶点起始下标（vertex） */
+    /** Vertex start index for each mesh (vertex) */
     vert: number[];
-    /** 每个 mesh 的三角形起始下标（triangle） */
+    /** Triangle start index for each mesh (triangle) */
     tri: number[];
-    /** 每个 instance 引用的 mesh 在 meshes[] 中的下标 */
+    /** Index into meshes[] of the mesh each instance references */
     instMesh: number[];
 }
 
@@ -145,26 +160,28 @@ function computeOffsets(insts: readonly Instance[]): SceneOffsets {
     return { meshes, blas, vert, tri, instMesh };
 }
 
-// 节点表
+// Node table
 
 /**
- * TLAS + 所有 mesh 的 BLAS 合并成一张扁平的 Float32Array。
+ * TLAS + the BLAS of every mesh combined into one flat Float32Array.
  *
- * 纯 CPU 的编译产物：这里只决定「节点按什么顺序排、下标怎么重基」，
- * 写进 buffer 是文件后半段 upload* 的事。
+ * A pure CPU compilation product: this only decides "in what order nodes are arranged and
+ * how indices are rebased"; writing it into a buffer is the job of the upload* functions
+ * later in the file.
  *
- * 合并的直接动因是绑定名额：WebGPU 默认每个 shader stage 最多 8 个 storage
- * buffer，几何 / 三角形 / 材质 / 实例 / 环境 CDF 已经接近上限，合并后才有
- * 位置放像素采样顺序表。
+ * The immediate reason to merge is binding slots: WebGPU allows at most 8 storage buffers
+ * per shader stage by default, and geometry / triangles / materials / instances /
+ * environment CDF are already near the limit; merging is what frees a slot for the pixel
+ * sample-order table.
  *
- * 布局：[TLAS 节点 ...][BLAS 节点 ...]，每节点 8 个 float。
+ * Layout: [TLAS nodes ...][BLAS nodes ...], 8 floats per node.
  */
 
 /**
- * 实例 → TLAS。
+ * Instances → TLAS.
  *
- * 叶子节点编码 -(instanceIndex + 1)；只有一个实例时直接退化成单节点，
- * 与 shader 里 `bvh.wgsl` 的约定一致。
+ * Leaf nodes encode -(instanceIndex + 1); a single instance degenerates to a single node,
+ * matching the convention in `bvh.wgsl`.
  */
 function buildTlas(insts: readonly Instance[]): Float32Array {
     if (insts.length === 0) return new Float32Array(0);
@@ -187,10 +204,12 @@ function buildTlas(insts: readonly Instance[]): Float32Array {
 }
 
 /**
- * 每个 mesh 合并成一棵 BLAS；叶子里的三角形下标重基到该 mesh 的全局三角形区。
+ * Merges each mesh into one BLAS; triangle indices in leaves are rebased to that mesh's
+ * global triangle region.
  *
- * @param nodeBase 这棵 BLAS 在合并 nodes buffer 里的起始下标（float）。
- *   内部节点的子节点偏移会加上它；叶子（负值）是三角形下标，不受影响。
+ * @param nodeBase Start index (float) of this BLAS in the combined nodes buffer.
+ *   Child offsets of internal nodes have it added; leaves (negative) are triangle
+ *   indices and are unaffected.
  */
 function mergeBLAS(offsets: SceneOffsets, nodeBase: number): Float32Array {
     const all = offsets.meshes.map((m) => meshBlas(m));
@@ -217,13 +236,13 @@ function mergeBLAS(offsets: SceneOffsets, nodeBase: number): Float32Array {
 }
 
 interface SceneNodesData {
-    /** [TLAS ...][BLAS ...]，每节点 8 floats */
+    /** [TLAS ...][BLAS ...], 8 floats per node */
     data: Float32Array;
-    /** BLAS 区在 data 里的起始下标（float），实例表的 blas_node_offset 要烘进它 */
+    /** BLAS region start index (float) in data; baked into the instance table's blas_node_offset */
     blasBase: number;
 }
 
-/** 建 TLAS，把所有 mesh 的 BLAS 接在它后面，并重基内部节点下标。 */
+/** Builds the TLAS, appends every mesh's BLAS after it, and rebases internal node indices. */
 function buildSceneNodes(insts: readonly Instance[], offsets: SceneOffsets): SceneNodesData {
     const tlas = buildTlas(insts);
     const blas = mergeBLAS(offsets, tlas.length);
@@ -233,12 +252,13 @@ function buildSceneNodes(insts: readonly Instance[], offsets: SceneOffsets): Sce
     return { data, blasBase: tlas.length };
 }
 
-// 搬上 GPU
+// Upload to the GPU
 
 /**
- * 编译产物 → GPU buffer。
+ * Compilation product → GPU buffer.
  *
- * 只做搬运：拿上面算好的数组建 buffer、写进去，不再算任何布局。
+ * Transport only: create buffers from the arrays computed above and write into them;
+ * no further layout computation.
  */
 
 function createBuffer(device: GPUDevice, data: Float32Array | Uint32Array, label: string, emptySize = 4): GPUBuffer {
@@ -261,7 +281,10 @@ function uploadGeometry(device: GPUDevice, offsets: SceneOffsets): GPUBuffer {
     return createBuffer(device, data, 'scene-geometry');
 }
 
-/** @param matSlots 每个 mesh 的材质表：把三角形里的相对材质下标映射成绝对槽位 */
+/**
+ * @param matSlots Material table for each mesh: maps the relative material index in a
+ *   triangle to an absolute slot
+ */
 function uploadTriangles(device: GPUDevice, offsets: SceneOffsets, matSlots: number[][]): GPUBuffer {
     let total = 0;
     for (const mesh of offsets.meshes) total += mesh.triangleData.length / 4;
@@ -281,7 +304,10 @@ function uploadTriangles(device: GPUDevice, offsets: SceneOffsets, matSlots: num
     return createBuffer(device, data, 'scene-triangles');
 }
 
-/** 世界变换的逆 —— 着色时从世界空间回到局部空间用。派生数据，故在打包时算。 */
+/**
+ * Inverse of the world transform — used in shading to go from world space back to local
+ * space. Derived data, so computed at pack time.
+ */
 function invertTransform(transform: Float32Array): Float32Array {
     return Mat4.from(transform).invert().raw();
 }
@@ -291,8 +317,8 @@ function uploadInstances(device: GPUDevice, insts: Instance[], offsets: SceneOff
     for (let i = 0; i < insts.length; i++) {
         const b = i * INST_FLOATS;
         const inst = insts[i];
-        // 同一 mesh 的所有 instance 指向同一棵 BLAS；BLAS 区在合并 nodes buffer
-        // 里从 blasBase 开始，所以这里把基址直接烘进 offset。
+        // All instances of the same mesh point at the same BLAS; the BLAS region starts at
+        // blasBase in the combined nodes buffer, so bake the base address into offset.
         data[b] = offsets.blas[offsets.instMesh[i]] + blasBase;
         const pm = (m: Float32Array, o: number) => {
             data[b + o] = m[0];
@@ -315,16 +341,23 @@ function uploadInstances(device: GPUDevice, insts: Instance[], offsets: SceneOff
         pm(inst.transform, 4);
         pm(invertTransform(inst.transform), 20);
     }
-    // WebGPU 对 `array<Instance>` 有最小 binding size（INST_FLOATS*4 B/instance），空场景也要满足
+    // WebGPU enforces a minimum binding size for `array<Instance>` (INST_FLOATS*4 B/instance);
+    // an empty scene must satisfy it too
     return createBuffer(device, data, 'scene-instances', INST_FLOATS * 4);
 }
 
-/** 节点表：[TLAS ...][BLAS ...]，每节点 8 floats（构造见上面的 buildSceneNodes）。 */
+/**
+ * Node table: [TLAS ...][BLAS ...], 8 floats per node
+ * (construction is in buildSceneNodes above).
+ */
 function uploadSceneNodes(device: GPUDevice, data: Float32Array): GPUBuffer {
     return createBuffer(device, data, 'scene-nodes');
 }
 
-/** 每个发光三角形存世界空间顶点、累计面积与发射辐亮度。 */
+/**
+ * Stores world-space vertices, cumulative area, and emitted radiance for each emissive
+ * triangle.
+ */
 function uploadEmitters(device: GPUDevice, instances: readonly Instance[]): GPUBuffer {
     const records = [0, 0];
     for (const { mesh, transform: m } of instances) {
@@ -365,11 +398,14 @@ class ModelImpl implements Model {
     public instanceBuffer!: GPUBuffer;
     private compiled = false;
     private emissionMultiplier = 1;
-    /** 每次成功追加加一；PathTracePass 靠它发现场景 buffer 换过。 */
+    /**
+     * Incremented on every successful append; PathTracePass uses it to notice scene
+     * buffers were replaced.
+     */
     private versionCounter = 0;
-    /** 已追加的实例（演化后的）；下一次 add 与它们合并后整体重编。 */
+    /** Appended (evolved) instances; the next add merges with them and recompiles everything. */
     private instances: Instance[] = [];
-    /** 换下来的旧 buffer，等 GPU 用完再 destroy。 */
+    /** Old buffers, destroyed once the GPU is done with them. */
     private readonly retired = new Set<GPUBuffer>();
     private destroyed = false;
     private readonly device: GPUDevice;
@@ -385,7 +421,7 @@ class ModelImpl implements Model {
     }
 
     public setEmissionScale(scale: number): void {
-        if (!Number.isFinite(Math.fround(scale)) || scale < 0) throw new Error('发光倍率必须是非负有限数');
+        if (!Number.isFinite(Math.fround(scale)) || scale < 0) throw new Error('emission scale must be a non-negative finite number');
         this.emissionMultiplier = Math.fround(scale);
     }
 
@@ -398,17 +434,19 @@ class ModelImpl implements Model {
     }
 
     public add(insts: Instance[]): void {
-        if (this.destroyed) throw new Error('Model: 已经 destroy');
+        if (this.destroyed) throw new Error('Model: already destroyed');
         if (insts.length === 0) return;
 
-        // 演化：材质上带位移贴图的 instance 在这里换成细分的真几何，
-        // 从那以后 GPU 侧既没有位移贴图，也没有「位移」这个概念
+        // Evolution: instances whose material has a displacement map are replaced here by
+        // tessellated real geometry; from then on the GPU side has no displacement map and
+        // no concept of "displacement" at all
         const instances = this.instances.concat(insts.map((inst) => inst.evolve()));
         const offsets = computeOffsets(instances);
-        // 材质按对象注册：同一材质被多个 mesh 引用时只占一个槽位
+        // Materials are registered by object: a material shared by several meshes takes one slot
         const matSlots = offsets.meshes.map((mesh) => mesh.materials.map((m) => this.materialStore.register(m)));
 
-        // 几何先建好；材质表编译失败时把新几何丢掉，旧场景不受影响
+        // Build geometry first; if material-table compilation fails, drop the new geometry
+        // and leave the old scene untouched
         const compiled = this.build(offsets, instances, matSlots);
         let previousMaterials: GPUBuffer | null;
         try {
@@ -455,11 +493,11 @@ class ModelImpl implements Model {
     }
 
     /**
-     * 旧 buffer 延迟释放。
+     * Delayed release of old buffers.
      *
-     * 已提交的 command buffer 里可能还绑着它们；`onSubmittedWorkDone()` 覆盖
-     * 调用时刻之前提交的全部工作。回调里再查一次集合：如果 `destroy()` 已经
-     * 先跑过，这里就不重复 destroy。
+     * Submitted command buffers may still reference them; `onSubmittedWorkDone()` covers
+     * all work submitted before the call. The callback checks the set again: if `destroy()`
+     * has already run, it does not destroy twice.
      */
     private retire(buffers: GPUBuffer[]): void {
         if (buffers.length === 0) return;
@@ -471,7 +509,10 @@ class ModelImpl implements Model {
         });
     }
 
-    /** 构建一整套新 buffer；失败时销毁已建的部分，不留下泄漏。 */
+    /**
+     * Builds a complete set of new buffers; on failure destroys the parts already created
+     * so nothing leaks.
+     */
     private build(offsets: SceneOffsets, insts: Instance[], matSlots: number[][]): CompiledBuffers {
         const d = this.device;
         const created: GPUBuffer[] = [];
@@ -480,7 +521,8 @@ class ModelImpl implements Model {
             return buf;
         };
         try {
-            // 节点表在 CPU 侧拼好，实例表要用它的 BLAS 基址
+            // The node table is assembled on the CPU; the instance table needs its BLAS
+            // base address
             const nodes = buildSceneNodes(insts, offsets);
             return {
                 nodes: track(uploadSceneNodes(d, nodes.data)),
@@ -497,7 +539,7 @@ class ModelImpl implements Model {
     }
 }
 
-/** 契约层类绑定的赋值。 */
+/** Assignment of the contract-layer class binding. */
 Model = ModelImpl;
 
 interface CompiledBuffers {
@@ -508,7 +550,7 @@ interface CompiledBuffers {
     instanceBuffer: GPUBuffer;
 }
 
-/** 丢弃一套还没换上去的编译产物。 */
+/** Discards a set of compiled buffers that was never swapped in. */
 function destroyCompiled(buffers: CompiledBuffers): void {
     buffers.nodes.destroy();
     buffers.geometry.destroy();

@@ -4,120 +4,133 @@ import type { Image } from './image';
 import { sub, dot, cross, normalize } from '../../math/vec3';
 
 /**
- * 网格 IR：几何 + 材质引用，不含任何 GPU 或加速结构。
+ * Mesh IR: geometry plus material references, with no GPU or acceleration structures.
  *
- * BLAS 是派生数据（buildMeshBvh），属于 compile 层，不放进 IR。
- * 唯一的例外是 `Mesh.evolve` —— 它把材质上的位移贴图烘成真几何，理由见接口注释。
+ * BLAS is derived data (buildMeshBvh) and belongs to the compile layer; it is not part of the IR.
+ * The one exception is `Mesh.evolve`, which bakes displacement maps from materials into real
+ * geometry; see the interface comment.
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * The file has two layers: contract (all exports) and implementation (no exports);
+ * see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ═════════════════ Contract layer (exports) ══════════════════
 
 /**
- * Mesh 的类绑定：从已经打包好的顶点 / 三角形数据构造一个网格。
+ * Class binding for Mesh: builds a mesh from pre-packed vertex and triangle data.
  *
- * vertexData 交错排布：pos(3) + normal(3) + uv(2) + tangent(4) = 12 floats/vertex；
- * triangleData 每个三角形 4 个 uint32：v0, v1, v2, matIdx。包围盒由顶点自动算出。
- * 程序化构造走 `MeshBuilder`。
+ * vertexData is interleaved: pos(3) + normal(3) + uv(2) + tangent(4) = 12 floats/vertex.
+ * triangleData holds 4 uint32 per triangle: v0, v1, v2, matIdx. Bounds are computed from
+ * the vertices.
+ * For procedural construction, use `MeshBuilder`.
  *
- * 此处只有声明，赋值在实现层。
+ * This is only a declaration; the assignment lives in the implementation layer.
  */
 export let Mesh: {
     new (vertexData: Float32Array, triangleData: Uint32Array, materials: readonly PBRMaterial[], name?: string): Mesh;
 };
 
 /**
- * 网格 IR：几何 + 材质引用，不含任何 GPU 或加速结构。
+ * Mesh IR: geometry plus material references, with no GPU or acceleration structures.
  *
- * BLAS 是派生数据（buildMeshBvh），属于 compile 层，不放进 IR。
+ * BLAS is derived data (buildMeshBvh) and belongs to the compile layer; it is not part of the IR.
  *
- * 唯一的例外是 `evolve()` —— 它把材质上的位移贴图烘成真几何。位移贴图是
- * 材质的运行时属性（导入器 / 场景作者给），而「一块几何长什么样」必须在这里
- * 定下来：BVH、包围盒、实例摆放读到的都得是已经演化过的顶点。
+ * The one exception is `evolve()`, which bakes displacement maps from materials into real
+ * geometry. A displacement map is a runtime property of the material (supplied by the importer
+ * or the scene author), while what a piece of geometry looks like must be settled here: the
+ * BVH, bounding box and instance placement all need to read the evolved vertices.
  */
 export interface Mesh {
-    /** 显示用名字（文件名或场景内标签），不参与任何计算 */
+    /** Display name (file name or in-scene label); not used in any computation. */
     readonly name?: string;
-    /** 交错排布：pos(3) + normal(3) + uv(2) + tangent(4) = 12 floats/vertex */
+    /** Interleaved: pos(3) + normal(3) + uv(2) + tangent(4) = 12 floats/vertex. */
     readonly vertexData: Float32Array;
-    /** 每个三角形 4 个 uint32：v0, v1, v2, matIdx */
+    /** 4 uint32 per triangle: v0, v1, v2, matIdx. */
     readonly triangleData: Uint32Array;
-    /** 这个 mesh 用到的 PBR 材质（triangleData 里的 matIdx 指向这里） */
+    /** PBR materials used by this mesh (matIdx in triangleData indexes into this). */
     readonly materials: readonly PBRMaterial[];
-    /** 局部空间 AABB */
+    /** Local-space AABB. */
     readonly bounds: AABB;
 
     /**
-     * 演化：把材质上的位移贴图消耗掉，返回可以直接进渲染的 mesh。
+     * Evolves the mesh by consuming displacement maps from its materials, returning a mesh
+     * ready to render.
      *
-     * 有位移贴图的三角形按图上一个 texel 一格的密度细分成网格、顶点按材质的
-     * 零点和刻度抬起，法线按高度场重新求；没有的三角形一个顶点都不动。返回的
-     * mesh 上，那些材质是删掉 `displacement` 的副本 —— 上 GPU 的材质里不再有
-     * 位移贴图。
+     * Triangles with a displacement map are tessellated into a grid at one texel per cell;
+     * their vertices are raised according to the material's mid/scale, and normals are
+     * recomputed from the height field. Triangles without one keep every vertex untouched.
+     * On the returned mesh those materials are copies with `displacement` removed, so no
+     * displacement map reaches the GPU.
      *
-     * 结果缓存在 mesh 上：同一个 mesh 的多个 instance 共享一份演化结果，
-     * 也就共享同一棵 BLAS。没有位移的 mesh 原样返回（=== 自己）。
+     * The result is cached on the mesh: multiple instances of the same mesh share one evolved
+     * result and therefore one BLAS. A mesh without displacement is returned as-is (=== itself).
      */
     evolve(): Mesh;
 }
 
 /**
- * MeshBuilder 的类绑定：构造一个空的程序化几何构造器。
+ * Class binding for MeshBuilder: creates an empty procedural geometry builder.
  *
- * 此处只有声明，赋值在实现层。
+ * This is only a declaration; the assignment lives in the implementation layer.
  */
 export let MeshBuilder: {
     new (): MeshBuilder;
 };
 
 /**
- * 程序化场景：不经过任何文件，直接在代码里构造 Instance。
+ * Procedural scenes: build Instances directly in code without going through any file.
  *
- * 用它当渲染管线的基准场景 —— 画面不对时可以直接排除 OBJ 解析。
+ * Use it as a reference scene for the render pipeline: when the image is wrong, OBJ parsing
+ * can be ruled out immediately.
  */
 export interface MeshBuilder {
     /**
-     * 四边形。UV 以**米**为单位（沿 a→b 和面内垂直方向），
-     * 所以贴图的重复次数只由贴图自己的一格几米（`Image.meters`）决定，与四边形多大无关 ——
-     * 一面 8 m 的墙和一块 1 m 的面用同一个材质，贴图密度是连续的。
+     * Quad. UVs are in **meters** (along a→b and perpendicular within the face), so the
+     * texture repeat count depends only on each map's meters-per-cell (`Image.meters`), not on
+     * the quad's size: an 8 m wall and a 1 m plane using the same material keep a continuous
+     * texture density.
      *
-     * `uv` 给了就改用给定的投影取坐标。默认的「沿边」在折起来的面上会换轴：
-     * 地面折成土坡那一刻，贴图方向跟着折 90°，图案在缝上错位。
+     * If `uv` is given, coordinates use that projection instead. The default "along the edges"
+     * projection switches axes on folded surfaces: where the ground folds into a slope, the
+     * texture direction turns 90° with it and the pattern breaks at the seam.
      */
     addQuad(corners: [Vec3, Vec3, Vec3, Vec3], material: number, uv?: UvProjection): void;
 
-    /** 打包成 Mesh。顶点不跨四边形共享。 */
+    /** Packs into a Mesh. Vertices are not shared across quads. */
     build(materials: readonly PBRMaterial[], name?: string): Mesh;
 }
 
-/** 贴图坐标（米）：顶点的 u/v = 到原点的位移在这两根轴上的投影。 */
+/** Texture coordinates (meters): a vertex's u/v is its offset from the origin projected
+ * onto these two axes. */
 export interface UvProjection {
     origin: Vec3;
-    /** 单位向量：贴图的 u 方向 */
+    /** Unit vector: the map's u direction. */
     uAxis: Vec3;
-    /** 单位向量：贴图的 v 方向 */
+    /** Unit vector: the map's v direction. */
     vAxis: Vec3;
 }
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ════════════ Implementation layer (not exported) ═════════════
 
 /**
- * 材质上的位移拆成两份：图 + 两个刻度（零点、每格几米）。格距不用给 —— 它由图自己定。
+ * A material's displacement splits into two parts: the map plus two scalars (mid, meters per
+ * cell). The cell size need not be supplied; the map determines it.
  *
- * 图上一个 texel 覆盖 `meters / width` 米，取它当细分格距：再多切就是采同一个
- * texel 好几遍（白烧三角形），再少切就是把几个 texel 压进一格（混叠成尖刺）。
+ * One texel covers `meters / width` meters; use that as the tessellation cell size. Cutting
+ * finer samples the same texel several times (wasted triangles); cutting coarser squeezes
+ * several texels into one cell (aliasing into spikes).
  *
- * 图在进这里之前要先降到网格采得住的分辨率（`prepareHeightImage`）。这一步
- * 放在这里而不是材质加载时：降多细取决于「有几块三角形要切」，材质不知道。
+ * The map must be downsampled to a resolution the grid can sample (`prepareHeightImage`)
+ * before it gets here. This happens here rather than at material load time because how far
+ * to downsample depends on how many triangles need cutting, which the material does not know.
  */
 interface Displacement {
     image: Image;
-    /** 高度零点，见 `PBRMaterial.displacementMid`。 */
+    /** Height midpoint; see `PBRMaterial.displacementMid`. */
     mid: number;
-    /** 高度刻度（米），见 `PBRMaterial.displacementScale`。 */
+    /** Height scale (meters); see `PBRMaterial.displacementScale`. */
     scale: number;
-    /** 细分格距（米）= 图上一个 texel 的边长。 */
+    /** Tessellation cell size (meters) = edge length of one texel in the map. */
     cell: number;
 }
 
@@ -126,24 +139,26 @@ function displacementOf(material: PBRMaterial): Displacement | undefined {
     if (!image) return undefined;
     const { displacementMid: mid, displacementScale: scale } = material;
     if (mid === undefined || scale === undefined) {
-        throw new Error('材质给了位移贴图，就必须给 displacementMid 和 displacementScale');
+        throw new Error('A material with a displacement map must provide displacementMid and displacementScale');
     }
     const prepared = prepareHeightImage(image);
     return { image: prepared, mid, scale, cell: (prepared.meters ?? 1) / prepared.width };
 }
 
-// 位移高度场
+// Displacement height field
 
 /**
- * 位移贴图 → 网格用的高度场：先降一次采样，再交给几何。
+ * Displacement map → height field for the mesh: downsample once, then hand it to geometry.
  *
- * 网格格距取的是**降采样之后**一个 texel 的边长（见 `displacementOf`），所以
- * 这一步决定了网格有多密。原图直接上会有两个问题：扫描噪点、JPEG 块比网格
- * 还细，会被当成真实起伏抽成尖刺；而网格密度翻倍则纯粹是白烧三角形。
- * 降一半之后，一个 texel 正好一格。
+ * The grid cell size is the edge length of one texel **after** downsampling (see
+ * `displacementOf`), so this step decides how dense the mesh is. Using the original map has
+ * two problems: scan noise and JPEG blocks are finer than the grid and get pulled into spikes
+ * as if they were real relief, while doubling the grid density simply wastes triangles.
+ * After halving, one texel matches one cell exactly.
  *
- * 要降到多细取决于「有几块三角形要切」，那张图自己不知道 —— 所以只有演化
- * 这一步该调它。材质共享于多个 mesh 时按源图缓存，降一次就够。
+ * How far to downsample depends on how many triangles need cutting, which the map itself
+ * cannot know, so only the evolve step should call this. When a material is shared by
+ * multiple meshes the result is cached by source image, so one downsample is enough.
  */
 function prepareHeightImage(image: Image): Image {
     const cached = preparedImages.get(image);
@@ -153,14 +168,16 @@ function prepareHeightImage(image: Image): Image {
     return prepared;
 }
 
-/** 源图 → 降采样结果。位移图在加载时被多个 instance 共享，降一次就够了。 */
+/** Source image → downsampled result. Displacement maps are shared by multiple instances
+ * at load time, so one downsample is enough. */
 const preparedImages = new WeakMap<Image, Image>();
 
 /**
- * 2×2 盒式降采样到 targetSize 以内。
+ * Downsamples with a 2×2 box filter to within targetSize.
  *
- * 采样定理：顶点间距必须小于 Nyquist 波长的一半。位移图和网格的尺寸比
- * 直接决定会不会混叠 —— 一个 texel 一个格是安全的上限。
+ * Sampling theorem: vertex spacing must be less than half the Nyquist wavelength. The size
+ * ratio between displacement map and grid directly determines whether aliasing occurs; one
+ * texel per cell is the safe upper limit.
  */
 function filterHeightImage(image: Image, targetSize: number): Image {
     let width = image.width;
@@ -193,7 +210,8 @@ function filterHeightImage(image: Image, targetSize: number): Image {
     return { ...image, width, height, data };
 }
 
-/** 双线性采样高度图（灰度存成 RGB，取任意通道），UV 按 repeat 环绕。 */
+/** Bilinearly samples the height map (grayscale stored as RGB; any channel works); UVs wrap
+ * with repeat. */
 function sampleHeight(image: Image, u: number, v: number): number {
     const w = image.width;
     const h = image.height;
@@ -213,15 +231,18 @@ function sampleHeight(image: Image, u: number, v: number): number {
 }
 
 /**
- * 位移量（米）：`(高度 - mid) × scale`，和 Blender Displacement 节点的
- * Midlevel / Scale 是同一套定义。两个数都由材质给，这里不测量、不缩放。
+ * Displacement in meters: `(height - mid) × scale`, the same definition as the Midlevel and
+ * Scale of Blender's Displacement node. Both values come from the material; nothing is
+ * measured or rescaled here.
  *
- * 早先这里按 5–95 分位自动标定、再用 tanh 压尾巴，理由是「扫描图存的不是
- * 绝对高度」。但资产其实给了绝对刻度（材质作者的 .blend 里就有），自己
- * 再测一遍只是把作者的选择换成一个猜的。
+ * Earlier versions auto-calibrated from the 5–95th percentiles and used tanh to clamp the
+ * tails, on the grounds that scanned maps do not store absolute height. But assets do supply
+ * an absolute scale (it is in the material author's .blend), so measuring it again only
+ * replaces the author's choice with a guess.
  *
- * u/v 是米制 UV，按图自己的一格几米（`image.meters`）折成图上的重复。只看 UV：
- * 同一个三角形上，位置不同、UV 相同的地方抬得一样高。
+ * u/v are metric UVs, folded into texture repeats using the map's meters per cell
+ * (`image.meters`). Only UVs matter: on one triangle, places with the same UV rise equally
+ * regardless of position.
  */
 function sampleDisplacement(image: Image, u: number, v: number, mid: number, scale: number): number {
     const meters = image.meters ?? 1;
@@ -251,11 +272,12 @@ class MeshImpl implements Mesh {
     }
 }
 
-/** 位移贴图烘成几何 —— `evolve()` 的实现。 */
+/** Bakes displacement maps into geometry; the implementation of `evolve()`. */
 function evolveMesh(mesh: Mesh): Mesh {
     const vd = mesh.vertexData;
     const td = mesh.triangleData;
-    // 材质副本：位移贴图和相关参数被消耗掉，其余字段一个不少
+    // Material copies with the displacement map and related scalars consumed, all other
+    // fields intact
     const materials = mesh.materials.map((m) => m.withoutDisplacement());
 
     const verts: number[] = [];
@@ -283,12 +305,13 @@ function evolveMesh(mesh: Mesh): Mesh {
 }
 
 /**
- * 把一个三角形铺成重心坐标网格：每边按最长边 / 格距等分，
- * 网格点按 `displacement` 抬起、按高度场重算法线。
+ * Lays out a triangle as a barycentric grid: divide each edge by the longest edge / cell
+ * size, raise grid points by `displacement`, and recompute normals from the height field.
  *
- * 两边三角形用同样的等分数，共用边上落点一致 —— 相邻三角形之间不会裂开。
- * 顶点不跨三角形共享（每个格子自带一份），代价是边界附近的重复顶点，
- * 换来的是不用做焊接、法线也不会在接缝处断开。
+ * Both adjacent triangles use the same subdivision count, so shared edges line up and
+ * neighboring triangles do not crack apart. Vertices are not shared across triangles (each
+ * cell carries its own), at the cost of duplicate vertices near edges; in return there is no
+ * welding to do and normals do not break at seams.
  */
 function tessellate(
     vd: Float32Array,
@@ -306,7 +329,7 @@ function tessellate(
     const longest = Math.max(edgeLength(a, b), edgeLength(a, c), edgeLength(b, c));
     const n = Math.max(1, Math.ceil(longest / displacement.cell));
 
-    // 三角形网格按行排：第 j 行有 n+1-j 个顶点（重心 j/n）
+    // Triangle grid laid out by rows: row j has n+1-j vertices (barycentric j/n)
     const rowStart = new Int32Array(n + 1);
     let cursor = verts.length / 12;
     for (let j = 0; j <= n; j++) {
@@ -342,11 +365,12 @@ function tessellate(
 }
 
 /**
- * 抬起一个顶点并重算法线（原地写 `v`）。
+ * Raises one vertex and recomputes its normal (writes `v` in place).
  *
- * 法线不靠相邻三角形平均：那是焊接之后才有的信息。这里走解析梯度 ——
- * 位移量是 UV 的连续函数，曲面沿 u/v 两个方向的导数直接中心差分出来，
- * 曲面法线 = 两条切线叉乘。网格再稀，法线也是平滑的。
+ * Normals are not averaged from neighboring triangles; that information only exists after
+ * welding. Instead this uses an analytic gradient: displacement is a continuous function of
+ * UV, so derivatives along u and v are central-differenced directly, and the surface normal
+ * is the cross product of the two tangents. Normals stay smooth even on a coarse grid.
  */
 function displace(v: Float32Array, d: Displacement): void {
     const u = v[6];
@@ -355,7 +379,8 @@ function displace(v: Float32Array, d: Displacement): void {
     const y = v[1];
     const z = v[2];
 
-    // 位移沿顶点法线：高度差 1.0 对应 d.scale 米，零点由材质的 mid 定
+    // Displace along the vertex normal: height difference 1.0 equals d.scale meters; mid
+    // sets the zero
     const nx = v[3];
     const ny = v[4];
     const nz = v[5];
@@ -364,7 +389,7 @@ function displace(v: Float32Array, d: Displacement): void {
     v[1] = y + ny * offset;
     v[2] = z + nz * offset;
 
-    // 切线基：法线 + 沿 u 的切线，副切线 = w × (n × t)
+    // Tangent basis: normal plus the tangent along u; bitangent = w × (n × t)
     const sign = v[11] < 0 ? -1 : 1;
     let tx = v[8];
     let ty = v[9];
@@ -374,7 +399,7 @@ function displace(v: Float32Array, d: Displacement): void {
     ty -= ny * along;
     tz -= nz * along;
     const len = Math.hypot(tx, ty, tz);
-    if (len < 1e-6) return; // 退化切线：法线原样留着，比除零强
+    if (len < 1e-6) return; // Degenerate tangent: keep the normal as-is rather than divide by zero
     tx /= len;
     ty /= len;
     tz /= len;
@@ -382,10 +407,11 @@ function displace(v: Float32Array, d: Displacement): void {
     const by = (nz * tx - nx * tz) * sign;
     const bz = (nx * ty - ny * tx) * sign;
 
-    // 中心差分两边各走一格（跨度两格）。步子不能再小：高度图一格才零点几
-    // 厘米，差分跨得比它还窄就会把扫描噪点当坡度。
+    // Central difference steps one cell each way (two cells total). The step cannot be
+    // smaller: a height-map cell is only a few millimeters, and a narrower difference would
+    // treat scan noise as slope.
     const e = d.cell;
-    // 采样已经是米，差分直接就是坡度（米/米），不用再乘刻度
+    // Samples are already in meters, so the difference is the slope (m/m); no scale needed
     const ku =
         (sampleDisplacement(d.image, u + e, w, d.mid, d.scale) -
             sampleDisplacement(d.image, u - e, w, d.mid, d.scale)) /
@@ -395,7 +421,8 @@ function displace(v: Float32Array, d: Displacement): void {
             sampleDisplacement(d.image, u, w - e, d.mid, d.scale)) /
         (2 * e);
 
-    // 曲面沿 u/v 的切线 = 切/副切线 + 法线方向的位移导数
+    // Surface tangents along u/v = tangent/bitangent plus the displacement derivative
+    // along the normal
     const ux = tx + nx * ku;
     const uy = ty + ny * ku;
     const uz = tz + nz * ku;
@@ -509,6 +536,6 @@ class MeshBuilderImpl implements MeshBuilder {
     }
 }
 
-/** 契约层类绑定的赋值。 */
+/** Assignments for contract-layer class bindings. */
 Mesh = MeshImpl;
 MeshBuilder = MeshBuilderImpl;

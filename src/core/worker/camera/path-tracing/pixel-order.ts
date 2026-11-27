@@ -1,22 +1,29 @@
 /**
- * 像素采样顺序：把 [0, count) 洗成一个随机排列。
+ * Pixel sampling order: shuffles [0, count) into a random permutation.
  *
- * 采样按这张表顺序进行 —— 每帧取连续的一段，一轮正好覆盖每个像素一次。
- * 这样既保证采样点在空间上随机分布，又保证不会漏采或重复采某个像素
- * （直到进入下一轮），累加平均的分母因此可以由「轮数 + 表内位置」推出。
+ * Sampling follows this table in order — each frame takes a contiguous run, and one
+ * round covers every pixel exactly once. This gives sampling points a spatially
+ * random distribution while ensuring no pixel is missed or sampled twice (until the
+ * next round), so the denominator of the running average can be derived from the
+ * round count + position in the table.
  *
- * 随机源是 xorshift32 驱动的 Fisher–Yates：不需要密码学质量，只要分布均匀、
- * 相邻采样在空间上不聚集。
+ * The random source is Fisher–Yates driven by xorshift32: no cryptographic quality
+ * needed, only a uniform distribution and no spatial clustering of neighboring
+ * samples.
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * The file has two layers: contract (all exports) and implementation (no exports);
+ * see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ═════════════════ Contract layer (exports) ══════════════════
 
-/** 生成像素采样顺序：[0, count) 的一个确定随机排列（xorshift32 + Fisher–Yates）。 */
+/**
+ * Generates the pixel sampling order: a deterministic random permutation of
+ * [0, count) (xorshift32 + Fisher–Yates).
+ */
 export let buildPixelOrder: (count: number) => Uint32Array;
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ════════════ Implementation layer (not exported) ═════════════
 
 buildPixelOrder = (count) => {
     const order = new Uint32Array(count);

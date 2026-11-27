@@ -29,15 +29,18 @@ fn lds2(seed: u32, sample: u32, dim: u32) -> vec2<f32> {
 struct SurfaceInfo {
   position: vec3<f32>,
   normal: vec3<f32>,
-  // 三角形自己的面法线，已翻向射线。着色用上面的插值法线，阴影射线的偏移
-  // 用这一条 —— 扫描模型的顶点法线在曲率大的地方会和真实面差很多，
-  // 拿它做偏移会把射线推进相邻三角形里，表现是表面上一片固定的黑点。
+  // The triangle's own face normal, flipped toward the ray. Shading uses the
+  // interpolated normal above; shadow-ray offsets use this one — on scanned
+  // models the vertex normals differ a lot from the true surface at high
+  // curvature, and offsetting with them pushes rays into adjacent triangles,
+  // showing up as fixed black dots on the surface.
   geo_normal: vec3<f32>,
   wo: vec3<f32>,           // direction from surface toward incoming ray
   albedo: vec3<f32>,
   roughness: f32,
   metallic: f32,
-  // 环境光遮蔽（0..1）：只衰减从这个点继续弹出去的间接光，直射光不乘。
+  // Ambient occlusion (0..1): attenuates only indirect light that keeps bouncing
+  // from this point; direct light isn't multiplied.
   ao: f32,
   hit: bool,
   transmission: f32,
@@ -64,7 +67,8 @@ fn compute_surface(ray: Ray, hit: BVHResult) -> SurfaceInfo {
   let o = material_slot(u32(hit.triangle_index)) * 33u;
 
   var base_color = vec3(materials[o+0u], materials[o+1u], materials[o+2u]);
-  // metallic / roughness 是 glTF 的 factor：有贴图时它们当乘数，没有时就是全部。
+  // metallic / roughness are glTF factors: with a texture they act as multipliers;
+  // without one they are the whole value.
   let metallic_factor = materials[o+3u];
   let roughness_factor = materials[o+4u];
   var metallic = metallic_factor;
@@ -105,17 +109,21 @@ fn compute_surface(ray: Ray, hit: BVHResult) -> SurfaceInfo {
   let tangent_axis = normalize(world_tangent - facing_normal * dot(facing_normal, world_tangent));
   let bitangent_axis = cross(facing_normal, tangent_axis) * local_tangent.w;
 
-  // 贴图采样：材质表里每个槽位是 [layer, scale, has, _]（见 compile/packing.ts）。
+  // Texture sampling: each material slot is [layer, scale, has, _] (see compile/packing.ts).
   //
-  // LOD 只能用估算：路径追踪没有屏幕空间导数，textureSample 用不了。
-  // 关键是像素覆盖不能当一个圆看：视线贴着地面走时，一个像素沿视线方向
-  // 覆盖好几米、垂直方向只覆盖几毫米。原来按「法线夹角」算一个各向同性
-  // 尺寸，两条轴一起降 mip，远景地面就糊成一片横向条纹 —— 掠射面看起来
-  // 「分辨率不够」，就是这里来的。所以沿 u/v 各算一次：小轴定 mip，
-  // 大轴用多次采样补回来（见 sample_texture）。
+  // LOD must be estimated: path tracing has no screen-space derivatives, so
+  // textureSample can't be used. The key is that a pixel footprint isn't a circle:
+  // when the view grazes the ground, one pixel covers several meters along the
+  // view direction but only a few millimeters perpendicular to it. The old code
+  // computed one isotropic size from "angle to the normal", dropping mips on both
+  // axes together, so distant ground blurred into horizontal streaks — that's
+  // where "not enough resolution" on grazing surfaces came from. So compute per
+  // axis along u/v: the minor axis sets the mip, the major axis is recovered with
+  // multiple taps (see sample_texture).
   //
-  // 沿轴 a 的世界覆盖是 step / sqrt(1 - (d·a)²)：视线越贴着这条轴走，
-  // 屏幕上一个像素在这条轴上跨得越远。截到 20 倍，地平线附近不退化。
+  // The world footprint along axis a is step / sqrt(1 - (d·a)²): the more grazing
+  // the view along that axis, the farther a screen pixel spans along it. Clamped
+  // to 20x so it doesn't blow up near the horizon.
   let pixel_angle = clamp(
     2.0 * tan(camera.fov * 0.5) / max(camera.resolution.y, 1.0),
     1e-6,
@@ -132,16 +140,18 @@ fn compute_surface(ray: Ray, hit: BVHResult) -> SurfaceInfo {
     let scale = materials[o + 9u];
     base_color = sample_texture(albedo_texture, materials[o + 8u], scale, uv, foot_t, foot_b).rgb;
   }
-  // 打包的 metallic-roughness（glTF 约定 / Poly Haven 的 arm 图）：G = 粗糙度，
-  // B = 金属度。金属度到这一版才真正能随贴图变化 —— 之前只有标量，
-  // 一张钢板上同时有漆面和裸金属的地方就画不对。
+  // Packed metallic-roughness (glTF convention / Poly Haven arm maps): G = roughness,
+  // B = metallic. Only in this version can metallic actually vary with a texture —
+  // before it was scalar only, so a steel plate with both painted and bare metal
+  // areas came out wrong.
   if (materials[o + 26u] > 0.5) {
     let scale = materials[o + 25u];
     let mr = sample_texture(roughness_texture, materials[o + 24u], scale, uv, foot_t, foot_b);
     roughness = mr.g * roughness_factor;
     metallic = mr.b * metallic_factor;
   }
-  // 单通道粗糙度图：和打包图并存时只覆盖粗糙度。
+  // Single-channel roughness map: when present alongside the packed map, it
+  // overrides roughness only.
   if (materials[o + 14u] > 0.5) {
     let scale = materials[o + 13u];
     roughness = sample_texture(roughness_texture, materials[o + 12u], scale, uv, foot_t, foot_b).r * roughness_factor;
@@ -153,8 +163,9 @@ fn compute_surface(ray: Ray, hit: BVHResult) -> SurfaceInfo {
     normal_perturbation = vec3(normal_perturbation.xy * normal_scale, normal_perturbation.z);
   }
 
-  // AO：材质表里 [layer, scale, has, _] 和另外三张图同一套约定。glTF 的
-  // occlusion 只有 R 通道，导入器会把 R 抄进 RGB，这里取 .r 即可。
+  // AO: material slots follow the same [layer, scale, has, _] convention as the
+  // other three maps. glTF occlusion only has an R channel; the importer copies R
+  // into RGB, so taking .r here is enough.
   var ao = 1.0;
   if (materials[o + 22u] > 0.5) {
     let occ = sample_texture(occlusion_texture, materials[o + 20u], materials[o + 21u], uv, foot_t, foot_b).r;
@@ -214,44 +225,49 @@ fn sample_hemisphere_cosine(n: vec3<f32>, r1: f32, r2: f32) -> vec3<f32> {
   return normalize(dir);
 }
 
-// BSDF 采样：漫反射瓣（Lambert）+ 镜面瓣（GGX）的混合
+// BSDF sampling: mixture of a diffuse lobe (Lambert) + a specular lobe (GGX)
 //
-// 采样时按 specular_probability 二选一；返回的 pdf 必须是**混合**密度
-// p·pdf_spec + (1-p)·pdf_diff —— 那才是这个采样过程在 wo 处的真实密度，
-// NEE 一侧的 MIS 用的也是同一个数。
+// Sampling picks one lobe according to specular_probability; the returned pdf must
+// be the **mixture** density p·pdf_spec + (1-p)·pdf_diff — that is the true
+// density of this sampling process at wo, and NEE's MIS uses the same number.
 //
-// 采样和求值共用 evaluate_bsdf，所以两者的 pdf 不会各算各的。
-// 以前采样是纯余弦、求值是 GGX 混合，两边对不上，MIS 权重加起来不等于 1。
+// Sampling and evaluation share evaluate_bsdf, so their pdfs can't diverge. The
+// old code sampled pure cosine but evaluated a GGX mixture; the two disagreed, so
+// the MIS weights didn't sum to 1.
 
 struct BSDFSample {
   wo: vec3<f32>,
   f: vec3<f32>,
   pdf: f32,
-  /// 这个方向是从镜面瓣还是余弦瓣采出来的。逃生到环境时，只有镜面样本
-  /// 才配按粗糙度取预滤波的 mip —— 余弦样本要的是余弦加权的半球平均，
-  /// 用一张被糊成全球平均的 mip 去乘它，地面会直接亮一倍。
+  /// Whether this direction was sampled from the specular or cosine lobe. When
+  /// escaping to the environment, only specular samples merit a roughness-based
+  /// prefiltered mip — cosine samples want a cosine-weighted hemisphere average,
+  /// and multiplying them by a mip blurred into a global average doubles the
+  /// ground brightness.
   specular: bool,
 }
 
-/// 镜面瓣的采样概率。sample_bsdf 和 evaluate_bsdf 必须用同一个值。
-/// 电介质（metallic = 0）留 20% 给镜面：它的真实贡献只有百分之几，
-/// 全给镜面会把余弦采样饿死，室内场景的漫反射噪声会明显变差。
+/// Specular-lobe sampling probability. sample_bsdf and evaluate_bsdf must use the
+/// same value. Dielectrics (metallic = 0) reserve 20% for specular: their true
+/// contribution is only a few percent, and giving it all to specular starves
+/// cosine sampling, noticeably worsening diffuse noise in indoor scenes.
 fn specular_probability(metallic: f32) -> f32 {
   return clamp(mix(0.2, 1.0, metallic), 0.05, 1.0);
 }
 
-/// Smith 几何项的 G1（单方向遮蔽）。VNDF 的 pdf 里需要它。
+/// Smith geometry term G1 (one-directional masking). The VNDF pdf needs it.
 fn smith_g1(n_dot_v: f32, alpha2: f32) -> f32 {
   let c = max(n_dot_v, 1e-4);
   return 2.0 * c / (c + sqrt(alpha2 * (1.0 - c * c) + c * c));
 }
 
-/// VNDF 采样 —— Heitz 2018, "Sampling the GGX Distribution of Visible Normals"。
+/// VNDF sampling — Heitz 2018, "Sampling the GGX Distribution of Visible Normals".
 ///
-/// 与按 D(h)·(n·h) 的 NDF 采样相比，只在「从视线看得见的那部分微表面」里采：
-/// 掠射角下不会把样本浪费在地平线以下的半程向量上，噪声明显更低。
+/// Compared with NDF sampling by D(h)·(n·h), it samples only the part of the
+/// microsurface visible from the view: at grazing angles it doesn't waste samples
+/// on half-vectors below the horizon, so noise is noticeably lower.
 ///
-/// 切线空间进、切线空间出（法线 = +Z）；ve 是视线方向。
+/// Tangent space in, tangent space out (normal = +Z); ve is the view direction.
 fn sample_ggx_vndf(ve: vec3<f32>, alpha: f32, r1: f32, r2: f32) -> vec3<f32> {
   let vh = normalize(vec3(alpha * ve.x, alpha * ve.y, max(ve.z, 1e-4)));
 
@@ -264,7 +280,7 @@ fn sample_ggx_vndf(ve: vec3<f32>, alpha: f32, r1: f32, r2: f32) -> vec3<f32> {
   let phi = 6.2831853 * r2;
   let p1 = r * cos(phi);
   var p2 = r * sin(phi);
-  // 把圆盘下半部分撑开，避开背向视线的微表面
+  // Stretch the lower half of the disk to avoid microsurfaces facing away from the view
   let s = 0.5 * (1.0 + vh.z);
   p2 = (1.0 - s) * sqrt(max(1.0 - p1 * p1, 0.0)) + s * p2;
 
@@ -272,7 +288,7 @@ fn sample_ggx_vndf(ve: vec3<f32>, alpha: f32, r1: f32, r2: f32) -> vec3<f32> {
   return normalize(vec3(alpha * nh.x, alpha * nh.y, max(nh.z, 1e-6)));
 }
 
-/// 世界空间下的 GGX 半程向量采样。alpha = roughness²。
+/// GGX half-vector sampling in world space. alpha = roughness².
 fn sample_ggx_half_vector(n: vec3<f32>, wo: vec3<f32>, alpha: f32, r1: f32, r2: f32) -> vec3<f32> {
   let tbn = build_tbn(n);
   let ve = vec3(dot(wo, tbn.u), dot(wo, tbn.v), dot(wo, tbn.w));
@@ -290,8 +306,8 @@ fn sample_bsdf(surf: SurfaceInfo, r1: f32, r2: f32, r3: f32) -> BSDFSample {
   if (specular) {
     let h = sample_ggx_half_vector(n, surf.wo, alpha, r1, r2);
     wo = normalize(reflect(-surf.wo, h));
-    // 反射到地平线以下：该方向的密度为 0，这个样本只能丢弃，
-    // 否则 f·cos/pdf 会除出巨大的权重，变成萤火虫。
+    // Reflected below the horizon: the density there is 0, so the sample must be
+    // discarded; otherwise f·cos/pdf divides out a huge weight and becomes a firefly.
     if (dot(wo, n) <= 0.0) { return BSDFSample(vec3(0.0, 1.0, 0.0), vec3(0.0), 0.0, true); }
   } else {
     wo = sample_hemisphere_cosine(n, r1, r2);
@@ -314,22 +330,24 @@ fn evaluate_bsdf(wi: vec3<f32>, wo: vec3<f32>, n: vec3<f32>, metallic: f32, roug
   let n_dot_wi = max(dot(n, wi_std), 0.001);
   let n_dot_wo = max(dot(n, wo), 0.001);
 
-  // 半程向量：wi 与 wo 几乎反向时（掠射）它没有定义，此时 BRDF 也没有意义
+  // Half-vector: undefined when wi and wo are nearly opposite (grazing), where the
+  // BRDF is meaningless.
   let hsum = wi_std + wo;
   if (dot(hsum, hsum) < 1e-12) { return BSDFResult(vec3(0.0), 0.0); }
   let h = normalize(hsum);
   let h_dot_n = dot(n, h);
   let n_dot_h = max(h_dot_n, 0.001);
   let h_dot_wo = max(dot(h, wo), 0.001);
-  // 半程向量落到表面之下：VNDF 采样器永远不会产生这种半程向量，
-  // 镜面瓣的 f 与 pdf 都必须归零，否则 NEE 在掠射角会高估 BSDF 的 pdf。
+  // Half-vector below the surface: the VNDF sampler never produces such a
+  // half-vector, so both the specular lobe's f and pdf must be zero; otherwise NEE
+  // overestimates the BSDF pdf at grazing angles.
   let spec_visible = select(0.0, 1.0, h_dot_n > 0.0);
 
   let a = max(roughness * roughness, 0.001);
   let a2 = a * a;
 
   let f0 = mix(vec3(0.04), albedo, metallic);
-  // Schlick 的夹角是「视线与半程向量」，不是视线与法线
+  // Schlick's angle is between the view direction and the half-vector, not the normal
   let fresnel = f0 + (vec3(1.0) - f0) * pow(1.0 - h_dot_wo, 5.0);
 
   let d = a2 / (3.14159265 * pow(n_dot_h * n_dot_h * (a2 - 1.0) + 1.0, 2.0));
@@ -341,8 +359,8 @@ fn evaluate_bsdf(wi: vec3<f32>, wo: vec3<f32>, n: vec3<f32>, metallic: f32, roug
   let f_spec = spec_visible * fresnel * d * g / (4.0 * n_dot_wi * n_dot_wo + 1e-8);
   let f_diff = albedo * (1.0 - metallic) / 3.14159265;
 
-  // VNDF 采样的立体角 pdf（Heitz 2018）：p(wo) = D(h)·G1(wo) / (4·(n·wo))。
-  // 必须和 sample_ggx_half_vector 用的是同一套采样过程，否则权重和 MIS 都会错。
+  // Solid-angle pdf of VNDF sampling (Heitz 2018): p(wo) = D(h)·G1(wo) / (4·(n·wo)).
+  // Must use the same sampling process as sample_ggx_half_vector, or weights and MIS go wrong.
   let pdf_spec = spec_visible * d * smith_g1(n_dot_wo, a2) / (4.0 * n_dot_wo);
   let pdf_diff = n_dot_wi / 3.14159265;
 
@@ -354,8 +372,9 @@ fn evaluate_bsdf(wi: vec3<f32>, wo: vec3<f32>, n: vec3<f32>, metallic: f32, roug
   );
 }
 
-// 阴影射线的法线偏移。要压过求交的 epsilon（1e-6）以避免自相交，又要远小于
-// 场景里最小的「面到面」间隙 —— 取 0.1 mm。
+// Normal offset for shadow rays. It must exceed the intersection epsilon (1e-6) to
+// avoid self-intersection, yet stay well below the smallest face-to-face gap in the
+// scene — 0.1 mm.
 
 const SHADOW_EPSILON = 1e-4;
 
@@ -367,25 +386,27 @@ fn mis_weight(pdf_a: f32, pdf_b: f32) -> f32 {
   return a2 / max(a2 + pdf_b * pdf_b, 1e-12);
 }
 
-// NEE: 环境光采样
+// NEE: environment-light sampling
 //
-// 环境是无穷远的发光体，没有「点」，只有方向：按亮度 CDF 采一个方向，
-// 追一条阴影射线，可见就直接取该方向的辐亮度。
+// The environment is an emitter at infinity — no point, only directions: sample a
+// direction from the luminance CDF, trace a shadow ray, and if visible take that
+// direction's radiance directly.
 //
-// 没有这一段时，太阳只能靠漫反射余弦采样「碰巧」命中，偶尔命中就会
-// 产生被 1/pdf 放大的萤火虫。有了 NEE，太阳方向每帧都被直接采到，
-// BSDF 一侧偶尔命中的样本再被 MIS 压低，萤火虫消失。
+// Without this, the sun could only be hit "by chance" through diffuse cosine
+// sampling, and the occasional hit produces fireflies amplified by 1/pdf. With NEE
+// the sun direction is sampled directly every frame, and the rare BSDF-side hits
+// are suppressed by MIS, so fireflies disappear.
 
 fn direct_environment(surf: SurfaceInfo, seed: u32, dim: ptr<function, u32>) -> vec3<f32> {
   let r1 = lds(seed, u.frame_index, *dim); *dim += 1u;
   let r2 = lds(seed, u.frame_index, *dim); *dim += 1u;
   let sample = sample_environment_light(r1, r2);
 
-  // 只采上半球（法线一侧）的方向
+  // Sample only directions in the upper hemisphere (normal side)
   let cos_surf = dot(surf.normal, sample.direction);
   if (cos_surf <= 0.0) { return vec3(0.0); }
 
-  // 环境在无穷远：命中任何表面都算被遮挡
+  // The environment is at infinity: hitting any surface counts as occluded
   let shadow_origin = surf.position + surf.geo_normal * SHADOW_EPSILON;
   let shadow_hit = intersect_scene(Ray(shadow_origin, sample.direction));
   if (shadow_hit.t > 0.0) { return vec3(0.0); }
@@ -395,14 +416,14 @@ fn direct_environment(surf: SurfaceInfo, seed: u32, dim: ptr<function, u32>) -> 
   );
   if (bsdf_val.pdf <= 0.0) { return vec3(0.0); }
 
-  // pdf 都是立体角测度，可以直接比较。
+  // Both pdfs are in solid-angle measure, so they can be compared directly.
   let mis_w = mis_weight(sample.pdf, bsdf_val.pdf);
   let radiance = env_texel(sample.direction);
 
   return mis_w * bsdf_val.f * radiance * cos_surf / max(sample.pdf, 1e-12);
 }
 
-// 面积采样转换成立体角 PDF，与 BSDF 采样使用同一测度。
+// Converts area sampling into a solid-angle PDF, using the same measure as BSDF sampling.
 fn emitter_pdf(origin: vec3<f32>, point: vec3<f32>, normal: vec3<f32>) -> f32 {
   let delta = point - origin;
   let distance_squared = dot(delta, delta);
@@ -454,16 +475,16 @@ fn environment_uv(direction: vec3<f32>) -> vec2<f32> {
   return vec2(phi / 6.2831853 + 0.5, 1.0 - theta / 3.14159265);
 }
 
-/// 相机射线直接逃进环境：mip 0 双线性。
+/// Camera ray escaping straight into the environment: mip 0 with bilinear filtering.
 fn env_radiance(direction: vec3<f32>) -> vec3<f32> {
   return textureSampleLevel(environment_texture, environment_sampler, environment_uv(direction), 0.0).rgb;
 }
 
-/// NEE 用：按纹素精确取值，和亮度 CDF 的采样保持同一个函数。
+/// For NEE: fetch exact texels, using the same function as luminance-CDF sampling.
 fn env_texel(direction: vec3<f32>) -> vec3<f32> {
   let uv = environment_uv(direction);
   let size = textureDimensions(environment_texture, 0);
-  // 夹到有效 texel：uv 正好落在 1.0 时坐标会越界。
+  // Clamp to a valid texel: when uv lands exactly at 1.0 the coordinate goes out of bounds.
   let coordinate = clamp(
     vec2<i32>(uv * vec2<f32>(size)),
     vec2<i32>(0),
@@ -472,14 +493,17 @@ fn env_texel(direction: vec3<f32>) -> vec3<f32> {
   return textureLoad(environment_texture, coordinate, 0).rgb;
 }
 
-/// BSDF 逃生方向用：按粗糙度取一条预滤波过的 mip。
+/// For BSDF escape directions: fetch a prefiltered mip based on roughness.
 ///
-/// GGX 瓣在环境图上覆盖的纹素宽度 ≈ 2α / (2π / width) = α·width/π（α = roughness²），
-/// 取 log2 就是 mip 级数。没有这一条时，光滑表面每个样本只取一个纹素 ——
-/// 釉面反射的是一张 2k 的点云，相邻样本在亮暗之间跳，收敛极慢。
+/// The GGX lobe covers a texel width on the environment map of about
+/// 2α / (2π / width) = α·width/π (α = roughness²); log2 of that is the mip level.
+/// Without this, each sample on a smooth surface fetches a single texel — a glazed
+/// reflection is then a 2k point cloud, adjacent samples jump between bright and
+/// dark, and convergence is very slow.
 ///
-/// 和 NEE 用不同的 mip 不影响无偏性：MIS 权重只看两侧的 pdf，不看亮度；
-/// 而这里估的本来就是「瓣内环境的平均」，模糊过的 mip 正是它的近似。
+/// Using a different mip than NEE doesn't affect unbiasedness: MIS weights look
+/// only at the two pdfs, not at brightness; and what's estimated here is the
+/// in-lobe environment average, for which a blurred mip is exactly the approximation.
 fn env_radiance_rough(direction: vec3<f32>, roughness: f32) -> vec3<f32> {
   let width = f32(textureDimensions(environment_texture, 0).x);
   let alpha = max(roughness * roughness, 1e-4);
@@ -487,14 +511,16 @@ fn env_radiance_rough(direction: vec3<f32>, roughness: f32) -> vec3<f32> {
   return textureSampleLevel(environment_texture, environment_sampler, environment_uv(direction), lod).rgb;
 }
 
-// 环境重要性采样
+// Environment importance sampling
 //
-// 环境图每像素权重 = 亮度 × sinθ（行内归一化），边缘 CDF 再按行权重归一化。
-// 采样步骤：先按边缘 CDF 选行，再按该行的条件 CDF 选列，最后取像素中心方向。
+// Environment-map per-pixel weight = luminance × sinθ (normalized within a row);
+// the marginal CDF is then normalized by row weights. Sampling: pick a row from
+// the marginal CDF, pick a column from that row's conditional CDF, then take the
+// direction at the pixel center.
 //
-// 立体角换算：等距柱状的 (u,v) → 立体角雅可比是 2π²·sinθ（u 覆盖 2π、v 覆盖 π），
-// 所以 pdf_ω = p_row · p_col · w·h / (2π² · sinθ)。
-// 采样和 pdf 用同一个公式，MIS 权重才自洽。
+// Solid-angle conversion: for equirectangular (u,v) the Jacobian to solid angle is
+// 2π²·sinθ (u covers 2π, v covers π), so pdf_ω = p_row · p_col · w·h / (2π² · sinθ).
+// Sampling and pdf use the same formula, keeping MIS weights consistent.
 
 struct EnvLightSample {
   direction: vec3<f32>,
@@ -508,7 +534,7 @@ fn sample_environment_light(r1: f32, r2: f32) -> EnvLightSample {
   let stride = w + 1u;
   let marginal_offset = h * stride;
 
-  // 选行（边缘 CDF 下标 y 表示「前 y 行的累计」）
+  // Pick a row (marginal CDF index y means "cumulative over the first y rows")
   var row_lo: u32 = 0u;
   var row_hi = h - 1u;
   loop {
@@ -520,7 +546,7 @@ fn sample_environment_light(r1: f32, r2: f32) -> EnvLightSample {
   let row = row_lo;
   let row_base = row * stride;
 
-  // 选列（行内条件 CDF）
+  // Pick a column (row-local conditional CDF)
   var col_lo: u32 = 0u;
   var col_hi = w - 1u;
   loop {
@@ -534,7 +560,7 @@ fn sample_environment_light(r1: f32, r2: f32) -> EnvLightSample {
   let row_prob = env_distribution[marginal_offset + row + 1u] - env_distribution[marginal_offset + row];
   let col_prob = env_distribution[row_base + col + 1u] - env_distribution[row_base + col];
 
-  // 像素中心 → 方向（与 environment_uv 互逆）
+  // Pixel center → direction (inverse of environment_uv)
   let theta = 3.14159265 * (1.0 - (f32(row) + 0.5) / f32(h));
   let phi = 6.2831853 * ((f32(col) + 0.5) / f32(w) - 0.5);
   let sin_theta = sin(theta);
@@ -546,7 +572,10 @@ fn sample_environment_light(r1: f32, r2: f32) -> EnvLightSample {
   return EnvLightSample(direction, pdf);
 }
 
-/** 任意方向在环境分布下的 pdf（立体角测度），供 BSDF 估计器做 MIS。 */
+/**
+ * PDF of an arbitrary direction under the environment distribution
+ * (solid-angle measure), used by the BSDF estimator for MIS.
+ */
 fn environment_pdf(direction: vec3<f32>) -> f32 {
   let size = textureDimensions(environment_texture, 0);
   let w = size.x;
@@ -567,11 +596,14 @@ fn environment_pdf(direction: vec3<f32>) -> f32 {
 }
 
 /**
- * 从材质贴图数组里按层号取一张，显式指定 LOD，并沿覆盖较长的轴做各向异性采样。
+ * Fetches one layer from the material texture array with an explicit LOD and does
+ * anisotropic sampling along the axis with the longer footprint.
  *
- * foot_t / foot_b 是像素在表面两个切向上的覆盖长度（米）。换成 texel 数之后，
- * 小的一轴决定 mip（细节不会被过度抹掉），大小轴之比决定沿大轴铺几个 tap。
- * 墙这种正对着看的面比值为 1，退化成一次采样；掠射地面才会走多 tap。
+ * foot_t / foot_b are the pixel footprint lengths in meters along the surface's
+ * two tangent directions. Converted to texels, the minor axis sets the mip (so
+ * detail isn't over-blurred), and the ratio of major to minor determines how many
+ * taps to spread along the major axis. A wall viewed head-on has ratio 1 and
+ * degenerates to a single sample; only grazing ground takes multiple taps.
  */
 fn sample_texture(
   texture: texture_2d_array<f32>,
@@ -586,13 +618,13 @@ fn sample_texture(
   let texels_b = max(foot_b * scale * size, 1.0);
   let major = max(texels_t, texels_b);
   let minor = min(texels_t, texels_b);
-  // 上限 4 个 tap：比值再大也截住，否则一次采样的开销没有上界。
+  // Cap at 4 taps: clamp even at larger ratios, otherwise per-sample cost is unbounded.
   let taps = i32(clamp(ceil(major / minor), 1.0, 4.0));
   let dir = select(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), texels_t >= texels_b);
 
   var sum = vec4<f32>(0.0);
   for (var i = 0; i < taps; i++) {
-    // tap 均匀铺满整段覆盖：taps = 1 时 offset 正好为 0
+    // Taps spread evenly over the footprint: with taps = 1 the offset is exactly 0
     let offset = (f32(i) + 0.5) / f32(taps) - 0.5;
     sum += textureSampleLevel(
       texture,

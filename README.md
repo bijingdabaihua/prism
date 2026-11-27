@@ -1,114 +1,114 @@
 # Prism
 
-一个从零写的 WebGPU 路径追踪器。不依赖 three.js 或第三方 BVH。
-渲染页的画面由浏览器实时计算；画廊封面是静态预览图。
+A WebGPU path tracer written from scratch. No three.js or third-party BVH.
+The render page image is computed in real time by the browser; gallery covers are static preview images.
 
-![荒地](assets/gallery/vase-on-dirt.png)
+![Wasteland](assets/gallery/vase-on-dirt.png)
 
-## 看什么
+## What to look at
 
-首页是画廊，每个场景一张卡片，点进去就是一页实时渲染的画面。访客不需要调任何参数 ——
-构图、光照、材质都在场景里定好了。
+The home page is a gallery with one card per scene; clicking through opens a page of real-time rendered imagery. Visitors do not need to tune any parameters —
+composition, lighting and materials are all fixed in the scene.
 
 | | |
 |---|---|
-| **荒地** | 一只青花瓷罐搁在夕阳下的砂土上，右下角躺着一根枯枝。地面由 3 × 3 块带位移的地砖拼成，覆盖约 6.33 m 见方；地表起伏是真几何，会参与求交和阴影。当前场景暂时关闭景深，以降低焦外噪点。 |
+| **Wasteland** | A blue-and-white porcelain vase sits on sand under the setting sun, with a dried branch lying at the lower right. The ground is made of 3 × 3 displaced tiles covering about 6.33 m square; the surface relief is real geometry and takes part in intersection and shadows. Depth of field is currently off in this scene to reduce out-of-focus noise. |
 
-渲染页左上角返回画廊。渲染跑在 Worker 里，主线程只负责显示；左键拖拽旋转、
-滚轮缩放、右键拖拽平移。
+The render page has a link back to the gallery at the top-left. Rendering runs in a Worker; the main thread only displays. Drag with the left button to orbit,
+scroll to zoom, drag with the right button to pan.
 
-## 跑起来
+## Running it
 
 ```bash
 npm install
 npm run dev        # http://localhost:5173
 ```
 
-需要支持 WebGPU 的浏览器：**Chrome / Edge 113+**，或 **Safari 18+**。
-Firefox 需要 `dom.webgpu.enabled`。不支持时会落到静态页 —— 渲染出来的图和
-一段说明，至少不会白屏。
+Requires a browser with WebGPU support: **Chrome / Edge 113+**, or **Safari 18+**.
+Firefox needs `dom.webgpu.enabled`. When unsupported it falls back to a static page — the rendered image and
+some explanation, so at least it isn't a blank screen.
 
-## AI 工作台
+## AI workbench
 
-「发光面板」右上角的「AI 调场景」接受文字指令，例如「把灯调暗一点」。
-本地在仓库根目录的 `.env.local` 设置 `VITE_PUBLIC_DEEPSEEK_API_KEY`，再重启 `npm run dev`。
-GitHub Pages 使用同名 GitHub Actions 仓库变量，设置后重新运行部署流程。
-此变量会打包到公开网页，适用于专门用于公开演示的凭据。未配置时画廊仍可正常浏览。
+The "Tune scene with AI" control in the top-right of the "Emissive Panel" scene accepts text commands, such as "make the lamp dimmer."
+For local use, set `VITE_PUBLIC_DEEPSEEK_API_KEY` in `.env.local` at the repo root, then restart `npm run dev`.
+GitHub Pages uses a GitHub Actions repository variable of the same name; re-run the deploy workflow after setting it.
+This variable is bundled into the public page, so it is suitable only for a credential dedicated to public demos. When it is not configured, the gallery still works normally.
 
-## 实现了什么
+## What's implemented
 
-**求交**
-- 两级 BVH（TLAS / BLAS），CPU 构建后扁平化成一维 buffer，GPU 上迭代遍历
-- Möller–Trumbore 三角形求交，局部空间求交保持 `t` 在实例缩放时不变
+**Intersection**
+- Two-level BVH (TLAS / BLAS), built on the CPU and flattened into a 1D buffer, traversed iteratively on the GPU
+- Möller–Trumbore triangle intersection; intersecting in local space keeps `t` unchanged when an instance is scaled
 
-**光照**
-- NEE：环境图按亮度 CDF 重要性采样，阴影射线可见就直接取该方向的辐亮度
-- MIS：BSDF 采样与光源采样用 power heuristic 混合
-- 俄罗斯轮盘赌：第 4 次弹射后按存活概率终止
-- 渐进累积：每帧累加 1 spp，相机和参数不动就不重置
+**Lighting**
+- NEE: the environment map is importance-sampled by a brightness CDF; if the shadow ray is visible, radiance from that direction is taken directly
+- MIS: BSDF sampling and light sampling are combined with the power heuristic
+- Russian roulette: after the 4th bounce, terminate by survival probability
+- Progressive accumulation: 1 spp added per frame, never reset while the camera and parameters stay put
 
-**其它**
-- 环境图重要性采样（2K EXR）；项目内解码器支持单部分 scanline EXR 的未压缩、ZIPS、ZIP 格式及 half / float RGB 通道
-- glTF 2.0 导入（`.gltf` 外链资源、`.glb` 单文件都行），
-  画面里那只瓷罐和枯枝就是这么进来的
-- 薄透镜景深：光圈半径 + 对焦距离，都是米；主射线从光瞳圆盘上一点出发，
-  指向焦平面上的同一个点；当前场景暂时关闭这一效果
-- 位移贴图烘成真几何（细分 + 顶点位移），进 BVH 参与求交和阴影；演化后的材质
-  不带位移字段，着色器不知道它存在
-- 材质贴图走 `texture_2d_array`：漫反射 / 法线 / 粗糙度 / 环境光遮蔽四个数组，
-  各自带完整 mip 链；glTF 的 metallicRoughness 打包图原样进粗糙度数组，
-  G 通道读粗糙度、B 通道读金属度（Poly Haven 的 arm 图同一套排列）
-- 每帧只采屏幕的一部分像素，dispatch 量由 GPU 实测耗时自适应；顺序表保证
-  每一轮正好覆盖每个像素一次，所以累加平均的分母不需要逐像素存储
+**Other**
+- Environment map importance sampling (2K EXR); the in-project decoder handles uncompressed, ZIPS and ZIP single-part scanline EXR with half / float RGB channels
+- glTF 2.0 import (both `.gltf` with external assets and single-file `.glb`);
+  that is how the porcelain vase and dried branch in the scene got in
+- Thin-lens depth of field: aperture radius + focus distance, both in meters; the primary ray starts from a point on the pupil disk
+  and aims at the same point on the focal plane; this effect is currently off in the scene
+- Displacement maps are baked into real geometry (tessellation + vertex displacement) that enters the BVH for intersection and shadows; the resulting material
+  carries no displacement field, so the shader doesn't know it exists
+- Material maps go through `texture_2d_array`: four arrays for diffuse / normal / roughness / ambient occlusion,
+  each with a full mip chain; glTF's packed metallicRoughness map goes into the roughness array as-is,
+  with the G channel read as roughness and the B channel as metalness (Poly Haven's arm maps follow the same layout)
+- Each frame samples only part of the screen, with dispatch size adapting to measured GPU time; the order table guarantees
+  every round covers every pixel exactly once, so the denominator of the accumulated average needs no per-pixel storage
 
-## 没做什么
+## What's not done
 
-写清楚边界比列功能表有用：
+Stating the boundaries clearly is more useful than a feature list:
 
-- **glTF 只吃三角形和四种贴图**。Draco / meshopt 压缩、蒙皮、动画、morph 都不支持
-  （Draco 会明确报错）
-- **不支持透明 / alpha 切边**。树叶、纱帘这类靠 alpha 裁形的模型会渲染成实心片
-  （材质 IR 里连 alpha 字段都不留，要做得从 glTF 导入一路加回来）
-- **光滑玻璃**：支持折射、菲涅耳反射与全内反射；尚不支持粗糙透射、体吸收或专门的焦散采样。
-- **BVH 是 16 桶 × 三条轴的分桶 SAH**；深度超过 40 层时退回中位数切分，
-  给 shader 的 64 层遍历栈留余量。叶子最多 2 个图元
-- **发光几何**使用面积采样和 MIS。glTF 支持 emissiveFactor 与 emissiveStrength，暂不支持发光贴图或独立点光源。
+- **glTF accepts only triangles and four texture types**. Draco / meshopt compression, skinning, animation and morph are all unsupported
+  (Draco reports an explicit error)
+- **No transparency / alpha cutout**. Models that rely on alpha cutouts, like leaves and sheer curtains, render as solid sheets
+  (the material IR doesn't even keep an alpha field; supporting it would mean adding it back all the way from glTF import)
+- **Smooth glass**: refraction, Fresnel reflection and total internal reflection are supported; rough transmission, volumetric absorption and dedicated caustic sampling are not yet.
+- **The BVH uses 16-bucket SAH binning across three axes**; beyond depth 40 it falls back to median split,
+  leaving headroom for the shader's 64-level traversal stack. Leaves hold at most 2 primitives
+- **Emissive geometry** uses area sampling and MIS. glTF supports emissiveFactor and emissiveStrength; emissive maps and separate point lights are not yet supported.
 
-## 结构
+## Structure
 
-依赖方向单向，越往下越不认识上面的东西：
+Dependencies point one way; the further down, the less a layer knows about the layers above it:
 
 ```
-src/app/               路由、画廊、渲染页、降级页、场景清单和装配
-src/core/api/          Prism 门面、主线程 RPC 和三个句柄
-src/core/worker/       Worker 入口及渲染实现
-  camera/              帧循环、路径追踪、显示
-  background/          环境图和亮度 CDF
-  model/               glTF、材质、图像解码、网格和 BVH
-src/core/math/         向量、矩阵、颜色
+src/app/               routing, gallery, render page, fallback page, scene catalog and assembly
+src/core/api/          Prism facade, main-thread RPC and three handles
+src/core/worker/       Worker entry and render implementation
+  camera/              frame loop, path tracing, display
+  background/          environment maps and brightness CDF
+  model/               glTF, materials, image decoding, meshes and BVH
+src/core/math/         vectors, matrices, colors
 ```
 
-光追完全跑在 Worker 里：`Prism.create()` 起一个 Worker、要一个独立 `GPUDevice`，
-主线程不碰 GPU，只通过 `camera.listen()` 接收 `ImageBitmap`。`src/core/worker/worker.ts`
-负责装配相机、背景和模型；场景定义与加载顺序留在 app 层。
+Path tracing runs entirely in the Worker: `Prism.create()` spawns a Worker and requests a dedicated `GPUDevice`.
+The main thread never touches the GPU and only receives `ImageBitmap` frames via `camera.listen()`. `src/core/worker/worker.ts`
+assembles the camera, background and models; scene definitions and load order stay in the app layer.
 
-约 8800 行 TypeScript + WGSL + CSS。
+About 8,800 lines of TypeScript + WGSL + CSS.
 
-### 加一个场景
+### Adding a scene
 
-在 `src/app/catalog.ts` 的 `SCENE_CARDS` 中添加机位、环境图、几何清单和卡片信息；
-按需扩展 `src/app/assemble.ts` 中的装配逻辑，再放一张 `assets/gallery/<key>.png` 当封面。
-路由、画廊、降级页都会自动带上它。
+Add the camera placement, environment map, geometry list and card info to `SCENE_CARDS` in `src/app/catalog.ts`;
+extend the assembly logic in `src/app/assemble.ts` as needed, then add a cover at `assets/gallery/<key>.png`.
+Routing, the gallery and the fallback page all pick it up automatically.
 
-## 场景从哪来
+## Where the scenes come from
 
-模型、贴图、环境图都来自 **Poly Haven**（CC0）：模型和材质下载后放进
-`assets/model/`、`assets/textures/`，环境图（EXR）放进 `assets/env/`。
-模型摆放和取景写在 `src/app/catalog.ts`；渲染器不认识具体场景。
+Models, textures and environment maps all come from **Poly Haven** (CC0): downloaded models and materials go into
+`assets/model/` and `assets/textures/`, environment maps (EXR) into `assets/env/`.
+Model placement and framing live in `src/app/catalog.ts`; the renderer knows nothing about specific scenes.
 
-地面这类大面积几何由 `src/app/ground.ts` 生成；位移贴图挂在材质上，网格在编译时细分成真几何，
-顶点抬起、法线按高度场重算，那张图进 GPU 之前就被消耗掉了。
+Large-scale geometry such as the ground is generated by `src/app/ground.ts`; the displacement map is attached to the material, the mesh is tessellated into real geometry at compile time,
+vertices are lifted and normals recomputed from the height field, and the map is consumed before it ever reaches the GPU.
 
-## 许可
+## License
 
 MIT

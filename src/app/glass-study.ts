@@ -2,10 +2,10 @@ import { Instance } from '../core/worker/model/instance';
 import { PBRMaterial } from '../core/worker/model/material/material';
 import { Mesh, MeshBuilder } from '../core/worker/model/mesh';
 
-/** 棋盘和封闭球体，用于观察光滑玻璃对格线的折射。 */
+/** A checkerboard and a closed sphere for observing how smooth glass refracts the grid lines. */
 export let buildGlassStudy: () => Instance[];
 
-// ═══════════════════════ 实现层（不导出） ═══════════════════════
+// ═════════ Implementation layer (not exported) ══════════
 
 buildGlassStudy = () => {
     const board = new MeshBuilder();

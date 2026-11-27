@@ -7,112 +7,133 @@ import { Mesh } from './mesh';
 import { loadTexture } from './image';
 
 /**
- * Instance IR：一个 mesh 的一次摆放，以及它的线上编解码和 glTF 导入器。
+ * Instance IR: a single placement of a mesh, plus its wire codec and glTF
+ * importer.
  *
- * 编解码跨线程：IR 的类实例过不了线程边界 —— 结构化克隆只带走可枚举字段，
- * 方法全丢，而 Worker 里 `engine.addInstances` → `Model.compile` 依赖
- * `evolve()` 这些方法。所以跨线程的是 `WireInstance` 裸数据，Worker 收到后
- * 按原样重建类实例。
+ * The codec crosses threads: IR class instances cannot cross a thread boundary
+ * — structured clone only carries enumerable fields and drops all methods, yet
+ * in the Worker `engine.addInstances` → `Model.compile` depends on methods such
+ * as `evolve()`. So the raw `WireInstance` data crosses the thread, and the
+ * Worker rebuilds the class instances from it.
  *
- * glTF 2.0 的解析器在实现层，由 `Instance.buildByGltf` 驱动：一个文件里的
- * 节点树在那里展开成若干 Instance。
+ * The glTF 2.0 parser lives in the implementation layer and is driven by
+ * `Instance.buildByGltf`: the node tree in a file is expanded into several
+ * Instances there.
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * The file has two layers: contract (all exports) and implementation (no
+ * exports); see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ═════════════════ Contract layer (exports) ══════════════════
 
 /**
- * Instance 的类绑定：构造一个实例（mesh + 变换）；静态方法 `buildByGltf`
- * 从 glTF 导入，`encode` / `decode` 是跨线程编解码。
+ * Class binding for Instance: constructs an instance (mesh + transform); the
+ * static method `buildByGltf` imports from glTF, and `encode` / `decode` form
+ * the cross-thread codec.
  *
- * 此处只有声明，赋值在实现层。
+ * Declarations only; the assignments live in the implementation layer.
  */
 export let Instance: {
     /**
-     * 构造：拷贝 transform（缺省单位阵）。mesh 不拷贝 —— 多个 instance
-     * 共享同一份几何，BLAS 按 mesh 建而不是按 instance 建。
+     * Constructor: copies the transform (identity matrix by default). The mesh
+     * is not copied — multiple instances share the same geometry, and the BLAS
+     * is built per mesh, not per instance.
      */
     new (mesh: Mesh, transform?: Float32Array): Instance;
 
     /**
-     * 读一个 glTF 文件（.gltf + 外链资源，或 .glb 单文件），返回若干可加入
-     * 场景的 Instance。解析代码在实现层。
+     * Reads a glTF file (.gltf with external resources, or a single-file .glb)
+     * and returns Instances ready to add to the scene. The parser lives in the
+     * implementation layer.
      *
-     * 一个文件可能包含多个节点，每个节点一次摆放 —— 所以返回的是数组，
-     * 调用方要把它们当成一个整体来摆放，而不是逐个摆放。
+     * A file may hold several nodes, each a separate placement — hence the
+     * array return, which the caller should place as a whole rather than one by
+     * one.
      *
-     * URL 会同时给出外链资源的 base；Blob 没有 base，所以适合自包含
-     * `.glb`、资源全部内嵌的 `.gltf`，或者把 `.gltf` / `.bin` / 贴图
-     * 一起装起来的 `.zip`。ZIP 会在 Worker 里解包，外链路径改写成
-     * 内存里的 blob URL，后面仍按同一套外链流程读。
+     * A URL also supplies the base for external resources; a Blob has no base,
+     * so it suits self-contained `.glb` files, `.gltf` files with all resources
+     * embedded, or a `.zip` bundling `.gltf` / `.bin` / textures. ZIPs are
+     * unpacked in the Worker and external paths are rewritten to in-memory blob
+     * URLs, after which the same external-resource flow still applies.
      *
-     * 材质已经在 Mesh 里了（贴图解码成 Image）：导入器交出的就是 IR 里
-     * 能直接交给引擎的东西，没有第二份「结果」需要调用方再拼。
+     * Materials are already on the Mesh (textures decoded into Image): the
+     * importer hands back exactly what the IR can give the engine, with no
+     * second result for the caller to assemble.
      *
-     * 支持的范围见实现层导入器的说明。
+     * See the importer's notes in the implementation layer for supported
+     * features.
      */
     buildByGltf(source: string | Blob): Promise<Instance[]>;
 
     /**
-     * 编码：Instance → 线上形态（`WireInstance`）。
+     * Encodes an Instance into its wire form (`WireInstance`).
      *
-     * 真正的序列化由 postMessage（结构化克隆）完成；编码做的是划定线上形态 ——
-     * 显式挑出会过去的字段，deliberately 丢掉类身份和 `Mesh` 的演化缓存
-     * （`evolved` 是 Worker 侧的运行时缓存，不该从主线程带过来）。typed array
-     * 按引用交给克隆，不在这里拷贝。
+     * postMessage (structured clone) does the actual serialization; encoding
+     * defines the wire shape — explicitly picking the fields that cross the
+     * boundary and deliberately dropping class identity and the `Mesh` evolution
+     * cache (`evolved` is a Worker-side runtime cache and should not come over
+     * from the main thread). Typed arrays are handed to the clone by reference
+     * and are not copied here.
      */
     encode(instance: Instance): WireInstance;
 
     /**
-     * 解码：线上形态 → Instance。
+     * Decodes the wire form into an Instance.
      *
-     * 收到的是克隆来的纯对象，先按形状校验，再用 IR 的构造函数复活：
-     * `Mesh` 构造会重算包围盒，`PBRMaterial` 构造会补默认值，`Instance` 构造
-     * 会拷贝变换。校验失败的错要能指认出「哪个字段不对」，而不是
-     * `undefined is not a function`。
+     * The input is a cloned plain object; validate its shape first, then revive
+     * it with the IR constructors: the `Mesh` constructor recomputes bounding
+     * boxes, `PBRMaterial` fills in defaults, and the `Instance` constructor
+     * copies the transform. A validation failure should name the offending field
+     * instead of surfacing as `undefined is not a function`.
      *
-     * 复活按内容去重：同一份几何会在一个批次里出现多次（程序化地面一块砖
-     * 一个 Instance，9 块砖共用一个 mesh），逐项构造会得到 9 个 Mesh 对象 ——
-     * 而 BLAS 缓存 / 材质表 / 贴图层都按对象身份去重。字节一样就只复活一份，
-     * 身份恢复了那三层去重才工作。
+     * Revive by content to deduplicate: the same geometry can appear many times
+     * in one batch (a procedural floor has one Instance per tile, and 9 tiles
+     * share one mesh); constructing each would yield 9 Mesh objects, while the
+     * BLAS cache / material table / texture layers all deduplicate by object
+     * identity. Identical bytes revive only once, and restoring identity is what
+     * makes those three levels of deduplication work.
      */
     decode(raw: unknown): Instance;
 };
 
 /**
- * Instance IR：一个 mesh 的一次摆放。
+ * Instance IR: a single placement of a mesh.
  *
- * 同一个 mesh 可以被多个 instance 引用 —— BLAS 应该按 mesh 共享，
- * 而不是每个 instance 复制一份。
+ * One mesh can be referenced by several instances — the BLAS should be shared
+ * per mesh, not duplicated per instance.
  *
- * 逆矩阵是派生数据，打包时现算（engine/model/model.ts），不存进 IR。
+ * The inverse matrix is derived data, computed on the fly when packing
+ * (engine/model/model.ts) and not stored in the IR.
  */
 export interface Instance {
-    /** 列主序 4×4 世界变换。公开可写：摆位（placeInstances）直接改它。 */
+    /** Column-major 4×4 world transform. Publicly writable: placement modifies it directly. */
     transform: Float32Array;
     readonly mesh: Mesh;
 
     /**
-     * 演化：让 mesh 把材质上的位移贴图消耗掉，返回可以直接进渲染的 instance。
+     * Evolves the instance: lets the mesh consume displacement maps from its
+     * materials and returns an instance ready for rendering.
      *
-     * 没有位移的 mesh 原样返回（`===` 自己），变换照抄；演化结果缓存在 mesh 上，
-     * 所以同一个 mesh 摆很多次也只算一遍、共用一棵 BLAS。
+     * A mesh without displacement is returned as-is (`===` itself) with the
+     * transform copied; the evolved result is cached on the mesh, so placing the
+     * same mesh many times computes it once and shares one BLAS.
      */
     evolve(): Instance;
 
-    /** 变换后的世界空间 AABB（包围盒的 8 个角逐个过变换）。 */
+    /** World-space AABB after the transform (all 8 bounding-box corners transformed). */
     getBounds(): { min: Vec3; max: Vec3 };
 }
 
 /**
- * Instance 的线上形态：主线程 `Instance.encode` → postMessage → Worker
- * `Instance.decode`。
+ * Wire form of an Instance: main-thread `Instance.encode` → postMessage →
+ * Worker `Instance.decode`.
  *
- * - `Image` 本来就是纯数据 interface，线上直接复用；
- * - 材质的线上形态就是 `PBRMaterialOptions`（构造参数的裸对象版）；
- * - typed array（vertexData / triangleData / transform）克隆后类型不变，
- *   解码时按类型校验。
+ * - `Image` is already a pure-data interface, so it is reused directly on the
+ *   wire;
+ * - the material wire form is `PBRMaterialOptions` (the constructor arguments
+ *   as a plain object);
+ * - typed arrays (vertexData / triangleData / transform) keep their type after
+ *   cloning and are type-checked on decode.
  */
 export interface WireMesh {
     name?: string;
@@ -127,34 +148,38 @@ export interface WireInstance {
 }
 
 /**
- * 实例在 scene-instances SSBO 里的记录尺寸（float 数）：BLAS 基址 1 +
- * 变换 16 + 逆变换 16 = 33，对齐填充到 36。打包见 engine/model/model.ts。
+ * Record size of an instance in the scene-instances SSBO (in floats): BLAS base
+ * 1 + transform 16 + inverse transform 16 = 33, padded to 36 for alignment. See
+ * engine/model/model.ts for packing.
  */
 export const INST_FLOATS = 36;
 
 export interface Placement {
     position: Vec3;
     /**
-     * 绕 X 轴，弧度。先于 `rotationY` 应用。
+     * Rotation about X, in radians. Applied before `rotationY`.
      *
-     * glTF 里站着的模型要躺下，只能绕水平轴放倒 —— 只绕 Y 转永远躺不平。
-     * 先绕 X 放倒、再绕 Y 摆方向，和手里拿个东西摆位置时的手感一致。
+     * To lay a standing glTF model down you must rotate about a horizontal axis
+     * — spinning about Y alone never lays it flat. Tipping it over with X and
+     * then aiming it with Y matches how it feels to set down an object in your
+     * hand.
      */
     rotationX?: number;
-    /** 绕 Y 轴，弧度。0 表示模型朝向不变。 */
+    /** Rotation about Y, in radians. 0 leaves the model's orientation unchanged. */
     rotationY?: number;
     scale?: number;
 }
 
 /**
- * 按作者指定的位置/朝向/缩放摆放一组实例，组内相对关系保持不变。
+ * Places a group of instances at an author-specified position / orientation /
+ * scale, preserving their relative arrangement.
  *
- * 贴图和模型都按米导出，所以 scale 一般给 1 —— 只有在模型尺寸明显不对时
- * 才调它，而不是拿它凑构图。
+ * Textures and models are exported in meters, so scale is usually 1 — adjust it
+ * only when a model's size is clearly wrong, not to fudge a composition.
  */
 export let placeInstances: (instances: readonly Instance[], p: Placement) => void;
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ════════════ Implementation layer (not exported) ═════════════
 
 const IDENTITY_MAT4: Readonly<Float32Array> = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
@@ -173,17 +198,20 @@ class InstanceImpl implements Instance {
         } else {
             buf = await source.arrayBuffer();
         }
-        // 内容指纹：Blob 被结构化克隆后对象身份会变，按内容算才能让同一份
-        // 资产在多次加载里复用解压结果和贴图层。
+        // Content fingerprint: structured cloning changes a Blob's object
+        // identity, so hashing the content lets the same asset reuse its
+        // decompressed result and texture layers across loads.
         const cacheId = contentCacheId(buf);
         if (!isUrl) {
-            // 非 zip Blob 没有目录基准；给内嵌图片一个不会和其他 Blob 撞的键
+            // A non-zip Blob has no directory base; give embedded images a key
+            // that will not collide with other Blobs
             baseUrl = `blob:${cacheId}/`;
         }
 
-        // ZIP 只在这一层展开：模型文件取出来继续走 glTF 解析，外链资源
-        // 改写成稳定复用的 blob URL —— 下游的 loadBuffers / loadTexture
-        // 不需要知道它来自压缩包。
+        // ZIP is only unpacked at this layer: the model file is extracted and
+        // continues through glTF parsing, while external resources are
+        // rewritten to stable, reusable blob URLs — downstream loadBuffers /
+        // loadTexture never need to know they came from an archive.
         const zip = isZip(buf) ? parseZip(buf, label, cacheId) : null;
         let modelPath = '';
         if (zip) {
@@ -223,7 +251,8 @@ class InstanceImpl implements Instance {
                 name: mesh.name,
                 vertexData: mesh.vertexData,
                 triangleData: mesh.triangleData,
-                // 展开成裸对象：字段一个不少（构造参数全在），原型不带过去
+                // Spread into a plain object: keeps every field (all constructor
+                // args are here) and drops the prototype
                 materials: mesh.materials.map((m) => ({ ...m })),
             },
         };
@@ -231,21 +260,21 @@ class InstanceImpl implements Instance {
 
     public static decode(raw: unknown): Instance {
         if (!raw || typeof raw !== 'object') {
-            throw new Error('实例数据不是对象');
+            throw new Error('Instance data is not an object');
         }
         const wire = raw as WireInstance;
         if (!wire.mesh || typeof wire.mesh !== 'object') {
-            throw new Error('实例数据缺少 mesh');
+            throw new Error('Instance data is missing mesh');
         }
         if (wire.transform !== undefined && !(wire.transform instanceof Float32Array)) {
-            throw new Error('实例数据的 transform 不是 Float32Array');
+            throw new Error('Instance data transform is not a Float32Array');
         }
         const { vertexData, triangleData, materials } = wire.mesh;
         if (!(vertexData instanceof Float32Array) || !(triangleData instanceof Uint32Array)) {
-            throw new Error('实例 mesh 的顶点 / 三角形数据缺失或类型不对');
+            throw new Error('Instance mesh vertex / triangle data is missing or has the wrong type');
         }
         if (!Array.isArray(materials)) {
-            throw new Error('实例 mesh 缺少材质表');
+            throw new Error('Instance mesh is missing its material table');
         }
         const key = meshFingerprint(wire.mesh);
         let mesh = decodedMeshes.get(key);
@@ -309,17 +338,21 @@ class InstanceImpl implements Instance {
 }
 
 /**
- * 复活去重表：内容指纹 → Mesh。Worker 生命周期内只增不减，和本文件的
- * `derivedBlobs` 一样是跨消息复用缓存。
+ * Revival dedup table: content fingerprint → Mesh. Only grows for the lifetime
+ * of the Worker; like this file's `derivedBlobs`, it is a cross-message reuse
+ * cache.
  */
 const decodedMeshes = new Map<string, Mesh>();
 
 /**
- * Mesh 内容指纹（非密码学）。
+ * Mesh content fingerprint (non-cryptographic).
  *
- * 用途是「字节一样的克隆体共用一份」，不是防篡改：全等字节必然同键；
- * 区分不同内容靠长度 + 首尾部哈希 + 等距采样 + 材质标量 / 贴图元数据，
- * 实用性上不可能撞。逐字节哈希 20 MB 级的顶点表要一秒级，采样是为此。
+ * Its purpose is sharing one copy among byte-identical clones, not tamper
+ * detection: identical bytes always produce the same key, while distinct
+ * content is told apart by length + head/tail hashes + evenly spaced sampling +
+ * material scalars / texture metadata, making collisions practically
+ * impossible. Hashing a 20 MB vertex table byte by byte takes on the order of a
+ * second, which is why sampling is used.
  */
 function meshFingerprint(mesh: WireMesh): string {
     const parts: string[] = [mesh.name ?? ''];
@@ -376,24 +409,27 @@ function fnv1a(bytes: Uint8Array): number {
 }
 
 /**
- * glTF 2.0 导入器：文件 → Instance[]。
+ * glTF 2.0 importer: file → Instance[].
  *
- * 支持的范围，以及每个缺失项会怎么坏：
- * - 只要三角形（mode 4），其它 primitive 模式直接报错而不是悄悄丢；
- * - 读 baseColor / normal / metallicRoughness / occlusion 四张图，分别进
- *   四个贴图数组；
- * - 节点变换进 Instance，顶点保持局部坐标，同一个 mesh 被多个节点引用时
- *   共享几何（BLAS 按 mesh 建，不该按节点建）；
- * - 不支持 Draco / meshopt 压缩、morph target、蒙皮、动画 —— 遇到 Draco
- *   明确报错，其余忽略。
+ * Supported features, and how each gap fails:
+ * - triangles only (mode 4); other primitive modes raise an error instead of
+ *   being silently dropped;
+ * - reads four maps — baseColor / normal / metallicRoughness / occlusion — into
+ *   four separate texture arrays;
+ * - node transforms go into Instances while vertices stay in local coordinates,
+ *   so a mesh referenced by several nodes shares its geometry (the BLAS is
+ *   built per mesh, not per node);
+ * - Draco / meshopt compression, morph targets, skinning and animation are not
+ *   supported — Draco raises an explicit error, the rest are ignored.
  *
- * 坐标与 UV 不需要转换：glTF 是 Y 轴向上、米为单位，且 UV 原点在贴图左上角，
- * 和 decodeBitmap 的解码方向、WebGPU 的采样原点一致。
+ * Coordinates and UVs need no conversion: glTF is Y-up, in meters, with the UV
+ * origin at the top-left of the texture, matching decodeBitmap's decode
+ * direction and WebGPU's sampling origin.
  */
 
-// 容器与常量
+// Containers and constants
 
-const GLB_MAGIC = 0x46546c67; // 'glTF' 小端
+const GLB_MAGIC = 0x46546c67; // 'glTF' little-endian
 const CHUNK_JSON = 0x4e4f534a; // 'JSON'
 const CHUNK_BIN = 0x004e4942; // 'BIN\0'
 
@@ -418,12 +454,12 @@ const TYPE_COMPONENTS: Record<string, number> = {
     MAT4: 16,
 };
 
-// 解析后的文档 —— 只声明用到的字段
+// Parsed document — declares only the fields used
 
 interface GltfDocument {
     accessors: GltfAccessor[];
     bufferViews: { buffer: number; byteOffset?: number; byteLength: number; byteStride?: number }[];
-    /** 只有材质的文档没有 buffer —— 顶点数据是唯一需要它的东西。 */
+    /** Material-only documents have no buffers; only vertex data needs them. */
     buffers?: { byteLength: number; uri?: string }[];
     meshes: GltfMesh[];
     nodes: GltfNode[];
@@ -469,9 +505,9 @@ interface GltfNode {
 
 interface GltfTextureRef {
     index: number;
-    /** normalTexture 的法线强度。 */
+    /** Normal scale for normalTexture. */
     scale?: number;
-    /** occlusionTexture 的遮挡强度。 */
+    /** Occlusion strength for occlusionTexture. */
     strength?: number;
 }
 
@@ -490,37 +526,45 @@ interface GltfMaterial {
     };
 }
 
-// 加载上下文
+// Load context
 
-/** 一次加载期间共享的状态：解码后的 buffer、贴图 URL 缓存、待释放的 blob URL。 */
+/** State shared during one load: decoded buffers, texture URL caches, blob URLs to release. */
 interface LoadContext {
     doc: GltfDocument;
     buffers: ArrayBuffer[];
     baseUrl: string;
-    /** texture 索引 → 已解析的贴图 URL。occlusion 要现场抽通道，单独缓存。 */
+    /**
+     * Texture index → resolved texture URL. Occlusion extracts a channel on the
+     * fly, so it is cached separately.
+     */
     textureUrls: Map<number, Promise<string | null>>;
-    /** image 索引 → 已解析的 URL（位移图直接按 image 引用，不经过 texture）。 */
+    /**
+     * Image index → resolved URL (displacement maps reference images directly,
+     * without going through textures).
+     */
     imageUrls: Map<number, Promise<string | null>>;
     occlusionUrls: Map<number, Promise<string | null>>;
 }
 
 /**
- * 派生 blob URL 的缓存，按「贴图来源」而不是按加载批次。
+ * Cache of derived blob URLs, keyed by texture source rather than load batch.
  *
- * 键必须是稳定的：TextureSet 用它当层号缓存键，图层永不回收 —— 如果每次
- * 加载都生成新的 blob URL，来回切几次场景就会把数组的层耗尽。
- * 代价是 blob 本身不释放（几百 KB），换来的是同一张贴图永远对应同一层。
+ * Keys must be stable: TextureSet uses them as layer cache keys, and layers are
+ * never reclaimed — generating a new blob URL on every load would exhaust the
+ * array's layers after a few scene switches. The cost is that the blobs
+ * themselves are never released (a few hundred KB), in exchange for one texture
+ * always mapping to one layer.
  */
 const derivedBlobs = new Map<string, Promise<string | null>>();
 
-// 容器
+// Containers
 
-/** .glb 是 12 字节头 + 若干 chunk；.gltf 就是纯 JSON。按 magic 判断，不看扩展名。 */
+/** .glb is a 12-byte header plus chunks; .gltf is pure JSON. Decided by magic, not extension. */
 function parseContainer(buf: ArrayBuffer, url: string): { doc: GltfDocument; bin: ArrayBuffer | null } {
     const view = new DataView(buf);
     if (buf.byteLength >= 12 && view.getUint32(0, true) === GLB_MAGIC) {
         const version = view.getUint32(4, true);
-        if (version !== 2) throw new Error(`glTF ${url}: 只支持 glTF 2.0，这个文件是 ${version}`);
+        if (version !== 2) throw new Error(`glTF ${url}: only glTF 2.0 is supported, this file is version ${version}`);
         let offset = 12;
         let doc: GltfDocument | null = null;
         let bin: ArrayBuffer | null = null;
@@ -535,35 +579,39 @@ function parseContainer(buf: ArrayBuffer, url: string): { doc: GltfDocument; bin
             }
             offset = start + length + ((4 - (length % 4)) % 4);
         }
-        if (!doc) throw new Error(`glTF ${url}: GLB 里没有 JSON chunk`);
+        if (!doc) throw new Error(`glTF ${url}: no JSON chunk in GLB`);
         return { doc, bin };
     }
     const text = new TextDecoder().decode(buf);
     if (text.trimStart().startsWith('<')) {
-        throw new Error(`glTF ${url}: 看起来是 HTML/XML，不是 JSON —— 多半是 404 页面`);
+        throw new Error(`glTF ${url}: looks like HTML/XML, not JSON — likely a 404 page`);
     }
     return { doc: JSON.parse(text) as GltfDocument, bin: null };
 }
 
-// ZIP 容器
+// ZIP containers
 //
-// 下载来的 glTF 资产经常是 .zip：里面一个 .gltf、一个 .bin、一个 textures/
-// 目录。Blob 只说明「有一段字节」，不解包的话 parseContainer 会把 ZIP 当
-// JSON 读。这里只做两件事：解开需要的条目，把 glTF 里的相对 URI 换成内存
-// blob URL；之后仍走原来的外链流程。
+// Downloaded glTF assets are often .zip files: one .gltf, one .bin and a
+// textures/ directory. A Blob only says "there are some bytes"; without
+// unpacking, parseContainer would read the ZIP as JSON. This layer does just
+// two things: extract the needed entries and rewrite relative URIs in the glTF
+// to in-memory blob URLs; the normal external-resource flow then continues.
 
 interface ZipEntry {
     method: number;
     compressedSize: number;
     uncompressedSize: number;
-    /** 该条目数据在 ZIP 文件里的起始字节。 */
+    /** Byte offset of this entry's data within the ZIP file. */
     dataOffset: number;
 }
 
 interface ZipArchive {
     buffer: ArrayBuffer;
     entries: Map<string, ZipEntry>;
-    /** 同一个来源跨多次加载的稳定标识，用来复用解压结果与 blob URL。 */
+    /**
+     * Stable identifier for one source across loads, used to reuse decompressed
+     * data and blob URLs.
+     */
     cacheId: string;
     label: string;
 }
@@ -575,10 +623,12 @@ const ZIP_METHOD_STORED = 0;
 const ZIP_METHOD_DEFLATE = 8;
 
 /**
- * 源字节的内容指纹（FNV-1a）。
+ * Content fingerprint of source bytes (FNV-1a).
  *
- * Blob 经 postMessage 到 Worker 后会变成新对象，按对象身份缓存对「外部一个
- * 一个传同一个 Blob」无效；按内容算才能跨消息复用 ZIP 解压结果和贴图层。
+ * A Blob becomes a new object after postMessage reaches the Worker, so caching
+ * by object identity fails when the same Blob is passed in one at a time from
+ * outside; hashing content is what lets ZIP decompression results and texture
+ * layers be reused across messages.
  */
 function contentCacheId(buf: ArrayBuffer): string {
     const bytes = new Uint8Array(buf);
@@ -590,7 +640,7 @@ function contentCacheId(buf: ArrayBuffer): string {
     return `content-${(hash >>> 0).toString(16)}-${bytes.length.toString(16)}`;
 }
 
-/** ZIP 条目 → 已解压的 blob URL；键按「来源 + 路径」，跨加载复用。 */
+/** ZIP entry → decompressed blob URL; keyed by source + path and reused across loads. */
 const zipObjectUrls = new Map<string, Promise<string>>();
 
 function isZip(buf: ArrayBuffer): boolean {
@@ -600,10 +650,11 @@ function isZip(buf: ArrayBuffer): boolean {
 }
 
 /**
- * 读 EOCD → 中央目录。
+ * Reads the EOCD → central directory.
  *
- * 只支持普通 ZIP（单卷、非加密、非 ZIP64）。素材包通常都是这种；不支持
- * 的情况明确报错，免得后面拿一堆乱码去喂 JSON.parse。
+ * Only plain ZIPs (single-volume, unencrypted, not ZIP64) are supported, which
+ * is what asset packs usually are; unsupported cases raise an explicit error so
+ * garbage is not later fed to JSON.parse.
  */
 function parseZip(buf: ArrayBuffer, label: string, cacheId: string): ZipArchive {
     const view = new DataView(buf);
@@ -615,7 +666,7 @@ function parseZip(buf: ArrayBuffer, label: string, cacheId: string): ZipArchive 
             break;
         }
     }
-    if (eocd < 0) throw new Error(`${label}: ZIP 里找不到中央目录（文件损坏或不是 ZIP）`);
+    if (eocd < 0) throw new Error(`${label}: no central directory found in ZIP (corrupt file or not a ZIP)`);
 
     const count = view.getUint16(eocd + 10, true);
     let offset = view.getUint32(eocd + 16, true);
@@ -624,7 +675,7 @@ function parseZip(buf: ArrayBuffer, label: string, cacheId: string): ZipArchive 
 
     for (let i = 0; i < count; i++) {
         if (offset + 46 > buf.byteLength || view.getUint32(offset, true) !== ZIP_CENTRAL) {
-            throw new Error(`${label}: ZIP 中央目录损坏`);
+            throw new Error(`${label}: corrupt ZIP central directory`);
         }
         const flags = view.getUint16(offset + 8, true);
         const method = view.getUint16(offset + 10, true);
@@ -635,27 +686,27 @@ function parseZip(buf: ArrayBuffer, label: string, cacheId: string): ZipArchive 
         const commentLength = view.getUint16(offset + 32, true);
         const localOffset = view.getUint32(offset + 42, true);
         if (offset + 46 + nameLength > buf.byteLength) {
-            throw new Error(`${label}: ZIP 文件名越界`);
+            throw new Error(`${label}: ZIP file name out of bounds`);
         }
         const name = decoder
             .decode(new Uint8Array(buf, offset + 46, nameLength))
             .replace(/\\/g, '/')
             .replace(/^\/+/, '');
 
-        if (flags & 1) throw new Error(`${label}: 不支持加密 ZIP（${name}）`);
+        if (flags & 1) throw new Error(`${label}: encrypted ZIP is not supported (${name})`);
         if (compressedSize === 0xffffffff || uncompressedSize === 0xffffffff || localOffset === 0xffffffff) {
-            throw new Error(`${label}: 不支持 ZIP64（${name}）`);
+            throw new Error(`${label}: ZIP64 is not supported (${name})`);
         }
 
         if (name && !name.endsWith('/')) {
             if (localOffset + 30 > buf.byteLength || view.getUint32(localOffset, true) !== ZIP_LOCAL) {
-                throw new Error(`${label}: ZIP 条目头损坏（${name}）`);
+                throw new Error(`${label}: corrupt ZIP entry header (${name})`);
             }
             const localName = view.getUint16(localOffset + 26, true);
             const localExtra = view.getUint16(localOffset + 28, true);
             const dataOffset = localOffset + 30 + localName + localExtra;
             if (dataOffset + compressedSize > buf.byteLength) {
-                throw new Error(`${label}: ZIP 条目越界（${name}）`);
+                throw new Error(`${label}: ZIP entry out of bounds (${name})`);
             }
             entries.set(name, { method, compressedSize, uncompressedSize, dataOffset });
         }
@@ -666,14 +717,17 @@ function parseZip(buf: ArrayBuffer, label: string, cacheId: string): ZipArchive 
     return { buffer: buf, entries, cacheId, label };
 }
 
-/** 选压缩包里的模型文件：忽略 macOS 元数据和隐藏目录，优先顶层 .gltf。 */
+/**
+ * Picks the model file in an archive: skips macOS metadata and hidden
+ * directories, preferring a top-level .gltf.
+ */
 function pickZipModel(zip: ZipArchive): string {
     const models = [...zip.entries.keys()].filter((name) => {
         if (name.startsWith('__MACOSX/')) return false;
         if (name.split('/').some((part) => part.startsWith('.'))) return false;
         return /\.(gltf|glb)$/i.test(name);
     });
-    if (models.length === 0) throw new Error(`${zip.label}: ZIP 里没有 .gltf / .glb`);
+    if (models.length === 0) throw new Error(`${zip.label}: no .gltf / .glb in ZIP`);
     const gltfs = models.filter((name) => /\.gltf$/i.test(name));
     const candidates = gltfs.length > 0 ? gltfs : models;
     const depth = (name: string) => name.split('/').length;
@@ -683,26 +737,26 @@ function pickZipModel(zip: ZipArchive): string {
 
 async function readZipEntry(zip: ZipArchive, path: string): Promise<Uint8Array<ArrayBuffer>> {
     const entry = zip.entries.get(path);
-    if (!entry) throw new Error(`${zip.label}: ZIP 里没有 "${path}"`);
+    if (!entry) throw new Error(`${zip.label}: no "${path}" in ZIP`);
 
     const raw = new Uint8Array(zip.buffer, entry.dataOffset, entry.compressedSize);
     if (entry.method === ZIP_METHOD_STORED) return raw.slice();
     if (entry.method !== ZIP_METHOD_DEFLATE) {
-        throw new Error(`${zip.label}: 不支持的 ZIP 压缩方式 ${entry.method}（${path}）`);
+        throw new Error(`${zip.label}: unsupported ZIP compression method ${entry.method} (${path})`);
     }
 
     if (typeof DecompressionStream === 'undefined') {
-        throw new Error(`${zip.label}: 这个浏览器没有 DecompressionStream，无法解压 ZIP`);
+        throw new Error(`${zip.label}: this browser has no DecompressionStream, cannot decompress ZIP`);
     }
     const stream = new Blob([raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
     const out = new Uint8Array(await new Response(stream).arrayBuffer());
     if (out.byteLength !== entry.uncompressedSize) {
-        throw new Error(`${zip.label}: "${path}" 解压后长度不对`);
+        throw new Error(`${zip.label}: "${path}" has the wrong length after decompression`);
     }
     return out;
 }
 
-/** ZIP 条目 → 可 fetch 的 blob URL；同一个路径只解压/建 URL 一次。 */
+/** ZIP entry → fetchable blob URL; each path is decompressed and turned into a URL once. */
 function zipEntryUrl(zip: ZipArchive, path: string): Promise<string> {
     const key = `${zip.cacheId}\0${path}`;
     const cached = zipObjectUrls.get(key);
@@ -715,14 +769,14 @@ function zipEntryUrl(zip: ZipArchive, path: string): Promise<string> {
     return job;
 }
 
-/** glTF 的 URI 可能是相对路径；相对的是模型文件所在目录。 */
+/** A glTF URI may be relative; it is relative to the directory containing the model file. */
 function resolveZipPath(dir: string, uri: string): string {
     const raw = uri.split('#')[0].split('?')[0];
     let decoded = raw;
     try {
         decoded = decodeURIComponent(raw);
     } catch {
-        // 原样使用；查不到时错误信息里还能看到原始路径
+        // Use it as-is; the original path still shows up in errors if lookup fails
     }
     const parts: string[] = [];
     for (const part of `${dir}${decoded}`.split('/')) {
@@ -738,11 +792,12 @@ function isAbsoluteUri(uri: string): boolean {
 }
 
 /**
- * 把 glTF 的 buffers / images 相对 URI 换成 ZIP 条目对应的 blob URL。
+ * Rewrites relative URIs in the glTF's buffers / images to blob URLs for the
+ * corresponding ZIP entries.
  *
- * 只改这两处：它们就是 glTF 里所有外链资源的入口。改完以后
- * `loadBuffers` / `imageUrl` / `channelUrl` 仍按「拿 URL 去 fetch」工作，
- * 不需要为 ZIP 分叉。
+ * Only these two places change: they are the entry points for all external
+ * resources in glTF. Afterwards `loadBuffers` / `imageUrl` / `channelUrl` still
+ * work by fetching a URL and need no ZIP-specific branch.
  */
 async function rewriteZipUris(doc: GltfDocument, zip: ZipArchive, modelPath: string): Promise<void> {
     const dir = modelPath.substring(0, modelPath.lastIndexOf('/') + 1);
@@ -752,7 +807,7 @@ async function rewriteZipUris(doc: GltfDocument, zip: ZipArchive, modelPath: str
             if (!ref.uri || isAbsoluteUri(ref.uri)) return;
             const path = resolveZipPath(dir, ref.uri);
             if (!zip.entries.has(path)) {
-                throw new Error(`${zip.label}: 模型引用了 "${path}"，但 ZIP 里没有这个文件`);
+                throw new Error(`${zip.label}: model references "${path}", but the ZIP has no such file`);
             }
             ref.uri = await zipEntryUrl(zip, path);
         }),
@@ -764,8 +819,9 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 /**
- * glTF 允许 buffer 分散在多个外部文件里，也可以只有一个内嵌 BIN。
- * 统一读成一组 ArrayBuffer，accessor 用 buffer 下标索引。
+ * glTF allows buffers to be spread across external files, or to be a single
+ * embedded BIN. Both are read into one array of ArrayBuffers, with accessors
+ * indexing buffers by position.
  */
 async function loadBuffers(
     doc: GltfDocument,
@@ -776,12 +832,12 @@ async function loadBuffers(
     return Promise.all(
         (doc.buffers ?? []).map(async (b, i) => {
             if (!b.uri) {
-                if (!bin) throw new Error(`glTF ${url}: buffer[${i}] 没有 uri，也没有内嵌 BIN chunk`);
+                if (!bin) throw new Error(`glTF ${url}: buffer[${i}] has no uri and no embedded BIN chunk`);
                 return bin;
             }
             const bufUrl = b.uri.startsWith('data:') ? b.uri : resolveUri(b.uri, baseUrl);
             const resp = await fetch(bufUrl);
-            if (!resp.ok) throw new Error(`glTF ${url}: 读不到 buffer[${i}] (${bufUrl})`);
+            if (!resp.ok) throw new Error(`glTF ${url}: failed to read buffer[${i}] (${bufUrl})`);
             return resp.arrayBuffer();
         }),
     );
@@ -790,23 +846,25 @@ async function loadBuffers(
 // accessor
 
 /**
- * 读成一个紧密排布的 Float32Array。
+ * Reads into a tightly packed Float32Array.
  *
- * 中间隔着一层 de-interleave：bufferView 可以带 byteStride（多个属性交错存在
- * 一起），而下游的 Mesh IR 要求紧密排布，所以这里必须逐元素取，不能直接把
- * 底层 ArrayBuffer 当成数组用 —— 那样对齐和步长都会错。
+ * A de-interleave step sits in between: a bufferView may have a byteStride
+ * (several attributes interleaved), while the downstream Mesh IR requires tight
+ * packing, so elements must be read one by one instead of treating the
+ * underlying ArrayBuffer as an array — that would get both alignment and stride
+ * wrong.
  */
 function readAccessorFloats(ctx: LoadContext, index: number): Float32Array {
     const acc = ctx.doc.accessors[index];
-    if (acc.sparse) throw new Error('glTF: 暂不支持 sparse accessor');
+    if (acc.sparse) throw new Error('glTF: sparse accessors are not supported yet');
     if (acc.bufferView === undefined) {
-        // 合法的「全零」accessor：没有 bufferView 就表示数据缺省为 0。
+        // A legal "all zeros" accessor: no bufferView means the data defaults to 0.
         return new Float32Array(acc.count * TYPE_COMPONENTS[acc.type]);
     }
 
     const components = TYPE_COMPONENTS[acc.type];
     const comp = COMPONENT[acc.componentType as keyof typeof COMPONENT];
-    if (!comp) throw new Error(`glTF: 未知的 componentType ${acc.componentType}`);
+    if (!comp) throw new Error(`glTF: unknown componentType ${acc.componentType}`);
 
     const bv = ctx.doc.bufferViews[acc.bufferView];
     const data = new DataView(ctx.buffers[bv.buffer]);
@@ -825,11 +883,11 @@ function readAccessorFloats(ctx: LoadContext, index: number): Float32Array {
     return out;
 }
 
-/** 索引统一升到 Uint32：Mesh IR 的 triangleData 本来就是 uint32。 */
+/** Indices are widened to Uint32: the Mesh IR's triangleData is already uint32. */
 function readIndices(ctx: LoadContext, index: number): Uint32Array {
     const acc = ctx.doc.accessors[index];
-    if (acc.type !== 'SCALAR') throw new Error(`glTF: 索引 accessor 的 type 是 ${acc.type}`);
-    if (acc.sparse) throw new Error('glTF: 暂不支持 sparse accessor');
+    if (acc.type !== 'SCALAR') throw new Error(`glTF: index accessor has type ${acc.type}`);
+    if (acc.sparse) throw new Error('glTF: sparse accessors are not supported yet');
     const bv = ctx.doc.bufferViews[acc.bufferView!];
     const data = new DataView(ctx.buffers[bv.buffer]);
     const base = (bv.byteOffset ?? 0) + (acc.byteOffset ?? 0);
@@ -842,17 +900,20 @@ function readIndices(ctx: LoadContext, index: number): Uint32Array {
     return out;
 }
 
-// 几何
+// Geometry
 
 /**
- * 一个 glTF mesh 的所有 primitive 合并成一个 Mesh IR。
+ * Merges all primitives of one glTF mesh into a single Mesh IR.
  *
- * 合并的理由是 Mesh IR 只有「一张顶点表 + 一张三角形表 + 材质数组」，
- * 一个 mesh 内部的多个 primitive 恰好共享同一套节点变换，合并后仍然只需要
- * 一个 Instance。primitive 之间的区分靠 triangleData 每四个数最后一位的材质下标。
+ * Merging works because the Mesh IR is just one vertex table + one triangle
+ * table + a material array; multiple primitives inside a mesh share the same
+ * node transform, so the merged result still needs only one Instance.
+ * Primitives are told apart by the material index in the last of every four
+ * numbers in triangleData.
  */
 function buildMesh(ctx: LoadContext, gm: GltfMesh, materials: PBRMaterial[], name: string): Mesh {
-    // 先扫一遍拿到总数，才能把几个 primitive 一次性铺进同一份顶点/三角形表
+    // Scan first to get the totals, so several primitives can be laid into one
+    // vertex/triangle table at once
     let vertexCount = 0;
     let idxCount = 0;
     for (const prim of gm.primitives) {
@@ -874,8 +935,8 @@ function buildMesh(ctx: LoadContext, gm: GltfMesh, materials: PBRMaterial[], nam
     const triangles = new Uint32Array(triCount * 4);
     const meshMaterials: PBRMaterial[] = [];
 
-    let vo = 0; // 顶点写入偏移
-    let to = 0; // 三角形写入偏移
+    let vo = 0; // vertex write offset
+    let to = 0; // triangle write offset
 
     for (const prim of gm.primitives) {
         const pos = readAccessorFloats(ctx, prim.attributes.POSITION);
@@ -895,7 +956,7 @@ function buildMesh(ctx: LoadContext, gm: GltfMesh, materials: PBRMaterial[], nam
         if (tan) gTan.set(tan, vo * 4);
         else hasTangents = false;
 
-        // 材质槽：同一个 PBRMaterial 在一个 mesh 里只占一个下标
+        // Material slot: one PBRMaterial takes a single index within a mesh
         const source = prim.material !== undefined ? materials[prim.material] : undefined;
         const mat = source ?? new PBRMaterial();
         let matIdx = meshMaterials.indexOf(mat);
@@ -908,7 +969,7 @@ function buildMesh(ctx: LoadContext, gm: GltfMesh, materials: PBRMaterial[], nam
             prim.indices !== undefined
                 ? readIndices(ctx, prim.indices)
                 : Uint32Array.from({ length: count }, (_, i) => i);
-        if (idx.length % 3 !== 0) throw new Error(`glTF: primitive 索引数 ${idx.length} 不是 3 的倍数`);
+        if (idx.length % 3 !== 0) throw new Error(`glTF: primitive index count ${idx.length} is not a multiple of 3`);
         for (let i = 0; i < idx.length; i += 3) {
             triangles[to] = idx[i] + vo;
             triangles[to + 1] = idx[i + 1] + vo;
@@ -922,8 +983,9 @@ function buildMesh(ctx: LoadContext, gm: GltfMesh, materials: PBRMaterial[], nam
 
     const triTotal = to / 4;
 
-    // 缺法线：glTF 规范要求按面法线算（平直着色）。这里做顶点平滑，
-    // 差别只在硬边处 —— 而没有法线的模型本来就没有硬边的意图。
+    // Missing normals: the glTF spec calls for face normals (flat shading).
+    // Here we do vertex smoothing; the difference only shows at hard edges, and
+    // models without normals were never meant to have hard edges anyway.
     if (!hasNormals) {
         const synthetic = [];
         for (let t = 0; t < triTotal; t++) {
@@ -945,10 +1007,11 @@ function buildMesh(ctx: LoadContext, gm: GltfMesh, materials: PBRMaterial[], nam
         }
     }
 
-    // 切线：文件里有就用（导出器算的更准），没有就从 UV 反推。
+    // Tangents: use the file's when present (exporters compute them more
+    // precisely); otherwise derive them from the UVs.
     const tangents = hasTangents ? gTan : computeTangents(positions, normals, hasUvs ? uvs : null, triangles, triTotal);
 
-    // 顶点交错排布：pos(3) + normal(3) + uv(2) + tangent(4)，与 Mesh IR 一致
+    // Interleaved vertex layout: pos(3) + normal(3) + uv(2) + tangent(4), matching the Mesh IR
     const vertexData = new Float32Array(vertexCount * 12);
     for (let v = 0; v < vertexCount; v++) {
         const d = v * 12;
@@ -974,24 +1037,28 @@ function buildMesh(ctx: LoadContext, gm: GltfMesh, materials: PBRMaterial[], nam
     );
 }
 
-/** 不支持的 primitive 在这里一次性挡掉，避免后面的解析报出看不懂的错。 */
+/**
+ * Unsupported primitives are rejected here up front, so later parsing does not
+ * fail with confusing errors.
+ */
 function checkPrimitive(prim: GltfPrimitive): void {
     if (prim.mode !== undefined && prim.mode !== MODE_TRIANGLES) {
-        throw new Error(`glTF: 只支持三角形（mode 4），这个 primitive 是 mode ${prim.mode}`);
+        throw new Error(`glTF: only triangles (mode 4) are supported, this primitive is mode ${prim.mode}`);
     }
     if (prim.attributes.POSITION === undefined) {
-        throw new Error('glTF: primitive 没有 POSITION 属性');
+        throw new Error('glTF: primitive has no POSITION attribute');
     }
     if (prim.extensions && 'KHR_draco_mesh_compression' in prim.extensions) {
-        throw new Error('glTF: 这个模型用了 Draco 压缩，需要先解压或改用未压缩导出');
+        throw new Error('glTF: this model uses Draco compression; decompress it first or export without compression');
     }
 }
 
-// 几何工具
+// Geometry helpers
 //
-// 只有 glTF 导入用得到：glTF 的顶点表可能缺法线、缺切线，三角形表是三个
-// 索引一组（这里再补一位材质下标，变成四个）。程序化几何走 MeshBuilder，
-// 自己有完整的顶点数据，不需要这些。
+// Only the glTF importer needs these: a glTF vertex table may lack normals or
+// tangents, and its triangle table groups three indices (a fourth — the
+// material index — is added here). Procedural geometry goes through MeshBuilder
+// with complete vertex data of its own and does not need these.
 
 interface FaceVertex {
     pi: number;
@@ -1170,13 +1237,15 @@ function computeSmoothNormals(
     return acc;
 }
 
-// 节点
+// Nodes
 
 /**
- * 沿节点树累乘变换，每个带 mesh 的节点产出一个 Instance。
+ * Accumulates transforms down the node tree, producing one Instance per node
+ * with a mesh.
  *
- * 变换留在 Instance 上而不是烤进顶点：同一个 mesh 被多个节点复用时，
- * 几何只该有一份（BLAS 按 mesh 建）。
+ * Transforms stay on the Instance instead of being baked into vertices: when
+ * several nodes reuse one mesh, the geometry should exist only once (the BLAS
+ * is built per mesh).
  */
 function buildInstances(doc: GltfDocument, meshes: Mesh[]): Instance[] {
     const out: Instance[] = [];
@@ -1207,7 +1276,8 @@ function localMatrix(node: GltfNode): Float32Array {
     const [x, y, z, w] = node.rotation ?? [0, 0, 0, 1];
     const [sx, sy, sz] = node.scale ?? [1, 1, 1];
 
-    // 四元数 → 旋转矩阵（列主序），再右乘缩放、写入平移
+    // Quaternion → rotation matrix (column-major), then right-multiply by
+    // scale and fill in translation
     const x2 = x + x,
         y2 = y + y,
         z2 = z + z;
@@ -1240,7 +1310,7 @@ function localMatrix(node: GltfNode): Float32Array {
     ]);
 }
 
-/** 列主序 4×4 相乘，out = a * b（先 b 后 a）。 */
+/** Column-major 4×4 multiply, out = a * b (b first, then a). */
 function mulMat4(a: Float32Array, b: Float32Array): Float32Array {
     const out = new Float32Array(16);
     for (let c = 0; c < 4; c++) {
@@ -1253,21 +1323,24 @@ function mulMat4(a: Float32Array, b: Float32Array): Float32Array {
     return out;
 }
 
-// 贴图
+// Textures
 
 function resolveUri(uri: string, baseUrl: string): string {
     if (/^https?:\/\//.test(uri) || uri.startsWith('data:') || uri.startsWith('blob:')) return uri;
     return baseUrl + uri.replace(/^\.\//, '');
 }
 
-/** 贴图来源的稳定标识：外链就是绝对 URL，内嵌就是「文件 + 图片下标」。 */
+/**
+ * Stable identifier of a texture source: an absolute URL for external files,
+ * or file + image index for embedded ones.
+ */
 function imageKey(ctx: LoadContext, imageIndex: number): string | null {
     const image = ctx.doc.images?.[imageIndex];
     if (!image) return null;
     return image.uri ? resolveUri(image.uri, ctx.baseUrl) : `${ctx.baseUrl}#image=${imageIndex}`;
 }
 
-/** image 索引 → 可直接 fetch 的 URL。内嵌图片转成 blob URL（只转一次）。 */
+/** Image index → directly fetchable URL. Embedded images become blob URLs (once). */
 function imageUrl(ctx: LoadContext, imageIndex: number): Promise<string | null> {
     const cached = ctx.imageUrls.get(imageIndex);
     if (cached) return cached;
@@ -1292,7 +1365,7 @@ function imageUrl(ctx: LoadContext, imageIndex: number): Promise<string | null> 
     return job;
 }
 
-/** texture 索引 → 可直接 fetch 的 URL。 */
+/** Texture index → directly fetchable URL. */
 function textureUrl(ctx: LoadContext, index: number): Promise<string | null> {
     const cached = ctx.textureUrls.get(index);
     if (cached) return cached;
@@ -1305,15 +1378,18 @@ function textureUrl(ctx: LoadContext, index: number): Promise<string | null> {
 }
 
 /**
- * 打包图 → 单通道贴图（把指定的通道抄到 RGB）。
+ * Packed map → single-channel map (copies the chosen channel into RGB).
  *
- * glTF 用压缩打包：roughness 在 G、metallic 在 B、occlusion 在 R。
- * metallicRoughness 整张直接进 roughness 数组，G/B 各取所需；只有 AO 走这里 ——
- * occlusion 数组的采样读 .r，而 R 通道正好就是 AO，抄进 RGB 只是为了配合
- * 其他贴图「单通道图三通道同值」的习惯，不是必需，但代价只有一次转码。
+ * glTF packs channels: roughness in G, metallic in B, occlusion in R. The whole
+ * metallicRoughness map goes straight into the roughness array, taking G/B as
+ * needed; only AO passes through here — the occlusion array samples read .r,
+ * and the R channel is exactly AO. Copying it into RGB only matches the other
+ * textures' habit of "single-channel maps repeated across RGB"; it is not
+ * required, but costs just one transcode.
  *
- * 只做重排、不做色彩转换（colorSpaceConversion: 'none'），所以数值不失真。
- * 派生结果按「源贴图 + 通道」缓存，同一张 ORM 图被多个材质引用只转一次。
+ * Only reordering, no color conversion (`colorSpaceConversion: 'none'`), so
+ * values are not distorted. Derived results are cached by source texture +
+ * channel, so one ORM map referenced by several materials is transcoded once.
  */
 function channelUrl(
     ctx: LoadContext,
@@ -1325,8 +1401,10 @@ function channelUrl(
     const cached = cache.get(index);
     if (cached) return cached;
     const job = (async (): Promise<string | null> => {
-        // 键按「源贴图」而不是按 glTF 材质：同一张 ARM 图被多个材质引用时只转一次，
-        // 而且换场景再加载回来仍然命中同一条缓存，不会多吃一层。
+        // Key by source texture rather than glTF material: one ARM map referenced
+        // by several materials is transcoded once, and reloading after a scene
+        // switch still hits the same cache entry instead of consuming another
+        // layer.
         const tex = ctx.doc.textures?.[index];
         const key = tex?.source !== undefined ? imageKey(ctx, tex.source) : null;
         if (!key) return null;
@@ -1342,7 +1420,7 @@ function channelUrl(
             const bitmap = await createImageBitmap(await resp.blob(), { colorSpaceConversion: 'none' });
             const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
             const c2d = canvas.getContext('2d');
-            if (!c2d) throw new Error('glTF: 2D context 不可用，无法重排 metallicRoughness');
+            if (!c2d) throw new Error('glTF: 2D context unavailable, cannot repack metallicRoughness');
             c2d.drawImage(bitmap, 0, 0);
             const px = c2d.getImageData(0, 0, bitmap.width, bitmap.height);
             const d = px.data;
@@ -1364,22 +1442,23 @@ function channelUrl(
 }
 
 /**
- * texture 索引 → 解码好的 Image。
+ * Texture index → decoded Image.
  *
- * URL 那一层只是为了命中解码缓存（内嵌图要先转 blob URL）：loadTexture 按
- * kind + URL 去重，同一张图被多个材质引用时拿到的是同一个 Image 对象。
+ * The URL layer exists only to hit the decode cache (embedded images must first
+ * become blob URLs): loadTexture deduplicates by kind + URL, so one image
+ * referenced by several materials yields the same Image object.
  */
 async function textureImage(ctx: LoadContext, index: number, kind: TextureKind): Promise<Image | undefined> {
     const url = await textureUrl(ctx, index);
     return url ? await loadTexture(url, kind) : undefined;
 }
 
-/** occlusion 的 R 通道 → AO 图。 */
+/** R channel of occlusion → AO map. */
 function occlusionUrl(ctx: LoadContext, index: number): Promise<string | null> {
     return channelUrl(ctx, index, 0, 'ao', ctx.occlusionUrls);
 }
 
-// 材质
+// Materials
 
 async function convertMaterial(gm: GltfMaterial, ctx: LoadContext): Promise<PBRMaterial> {
     const pbr = gm.pbrMetallicRoughness ?? {};
@@ -1402,8 +1481,9 @@ async function convertMaterial(gm: GltfMaterial, ctx: LoadContext): Promise<PBRM
         options.normalTexture = await textureImage(ctx, gm.normalTexture.index, 'normal');
     }
     if (pbr.metallicRoughnessTexture) {
-        // 整张 RGBA 原样保留：G 是粗糙度、B 是金属度，shader 各取所需。
-        // 早先这里只抽出 G 通道、丢掉 B —— 金属度就永远停在标量上。
+        // Keep the whole RGBA map intact: G is roughness and B is metallic, and
+        // the shader takes what it needs. Earlier this extracted only G and
+        // dropped B — metallic then stayed stuck at its scalar value.
         options.metallicRoughnessTexture = await textureImage(ctx, pbr.metallicRoughnessTexture.index, 'roughness');
     }
     if (gm.occlusionTexture) {
@@ -1414,7 +1494,7 @@ async function convertMaterial(gm: GltfMaterial, ctx: LoadContext): Promise<PBRM
     return new PBRMaterial(options);
 }
 
-// 摆位
+// Placement
 
 placeInstances = (instances, p) => {
     const s = p.scale ?? 1;
@@ -1422,7 +1502,7 @@ placeInstances = (instances, p) => {
     const sy = Math.sin(p.rotationY ?? 0);
     const cx = Math.cos(p.rotationX ?? 0);
     const sx = Math.sin(p.rotationX ?? 0);
-    // Ry · Rx，列主序
+    // Ry · Rx, column-major
     const m = Mat4.from(
         new Float32Array([
             cy * s,
@@ -1448,5 +1528,5 @@ placeInstances = (instances, p) => {
     }
 };
 
-/** 契约层绑定的赋值。 */
+/** Assignment of the contract-layer binding. */
 Instance = InstanceImpl;

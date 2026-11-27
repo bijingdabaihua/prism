@@ -1,32 +1,36 @@
 import type { PBRMaterial } from './material';
 
 /**
- * IR → GPU 定长布局的打包。
+ * IR → GPU fixed-size layout packing.
  *
- * 这里是唯一把 PBRMaterial 摊平成定长 float、把贴图图集坐标塞进槽位的地方；
- * shader 那边的下标与这里一一对应，改一边必须改另一边。
+ * This is the only place that flattens PBRMaterial into fixed-length floats and puts atlas
+ * coordinates into slots; shader-side indices correspond one-to-one, so changing one side
+ * requires changing the other.
  *
- * 布局（33 floats / 132 B，槽位下标写在注释里）：
+ * Layout (33 floats / 132 B, slot indices noted in the comments):
  *   0–2   baseColor            3  metallic
  *   4     roughness            5  normalScale
- *   6     occlusionStrength    7  填充
+ *   6     occlusionStrength    7  padding
  *   8–11  baseColor TexRef    12–15 roughness TexRef
  *   16–19 normal TexRef       20–23 occlusion TexRef
  *   24–27 metallic-roughness TexRef
  *   28    transmission          29 ior
  *   30–32 emission RGB
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * The file has two layers: contract (all exports) and implementation (no exports);
+ * see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ══════════════════ Contract layer (exports) ═════════════════
 
 /**
- * 一张贴图在 texture_2d_array 里的位置。
+ * Position of a texture in a texture_2d_array.
  *
- * 贴图按 kind 分到四个数组（albedo / normal / roughness / occlusion），所以一个引用
- * 只需要层号；采样时 UV 再乘 scale —— 几何 UV 以米为单位，scale 是「每米重复几次」，
- * 由贴图自己的一格几米（`Image.meters`）换出来，让墙面这种大表面的贴图密度不随几何尺寸变化。
+ * Textures are split into four arrays by kind (albedo / normal / roughness / occlusion), so a
+ * reference only needs a layer number; at sampling time UVs are multiplied by scale — geometry
+ * UVs are in meters, and scale is "repeats per meter", derived from the texture's own meters
+ * per tile (`Image.meters`), so texture density on large surfaces like walls does not vary with
+ * geometry size.
  */
 export interface TexRef {
     layer: number;
@@ -39,19 +43,19 @@ export interface MaterialTexSlots {
     roughness?: TexRef;
     normal?: TexRef;
     occlusion?: TexRef;
-    /** 打包的 metallic-roughness（G = rough, B = metal），存在 roughness 数组里。 */
+    /** Packed metallic-roughness (G = rough, B = metal), stored in the roughness array. */
     metallicRoughness?: TexRef;
 }
 
-/** 材质在 SSBO 里的定长记录尺寸（float 数），布局见文件头。 */
+/** Fixed record size of a material in the SSBO (float count); layout is in the file header. */
 export const PBR_MAT_FLOATS = 33;
 
-/** PBRMaterial + 贴图槽位 → GPU 定长记录（PBR_MAT_FLOATS floats）。 */
+/** PBRMaterial + texture slots → fixed GPU record (PBR_MAT_FLOATS floats). */
 export let packPBRMaterial: (m: PBRMaterial, tex?: MaterialTexSlots) => Float32Array;
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ═════════════ Implementation layer (not exported) ════════════
 
-/** TexRef → 4 floats。没有贴图时 layer=0、scale=1、has=0。 */
+/** TexRef → 4 floats. Without a texture, layer=0, scale=1, has=0. */
 function packTexRef(t: TexRef | undefined): number[] {
     return t ? [t.layer, t.scale, t.has, 0] : [0, 1, 0, 0];
 }

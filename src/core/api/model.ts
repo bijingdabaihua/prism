@@ -1,81 +1,87 @@
 /**
- * 主线程模型句柄：契约 + 实现。
+ * Main-thread model handle: contract + implementation.
  *
- * 文件解码、位移、BVH 全在 Worker 里；这边只递资产字节。创建入口是
- * `createModel(rpc)`，实现类不导出。
+ * File decoding, displacement and BVH all live in the Worker; this side only passes asset bytes.
+ * The factory is `createModel(rpc)`; the implementation class is not exported.
  */
 
 import { Instance } from '../worker/model/instance';
 import type { WireInstance } from '../worker/model/instance';
 
 /**
- * 公开契约
+ * Public contract
  *
- * 以下类型和接口是对外 API。修改前先确认调用方影响。
+ * The types and interfaces below are the external API. Check caller impact before changing.
  */
 
-/** 一组实例的摆放，语义与场景构建器里的 `placeInstances` 一致。 */
+/** Placement for a group of instances; same semantics as `placeInstances` in the scene builder. */
 export interface InstancePlacement {
     position: { x: number; y: number; z: number };
-    /** 绕 X 轴，弧度。先于 rotationY 应用。 */
+    /** Rotation around the X axis in radians, applied before rotationY. */
     rotationX?: number;
-    /** 绕 Y 轴，弧度。 */
+    /** Rotation around the Y axis in radians. */
     rotationY?: number;
     scale?: number;
 }
 
 /**
- * 模型句柄 —— 场景几何的远程入口。
+ * Model handle — the remote entry point for scene geometry.
  *
- * 两个入口，语义都是追加到当前场景，不是替换：
- * - `loadGltf` 递资产包字节，解析、摆位、解码全在 Worker；
- * - `loadInstances` 递 app 在主线程构造好的一组 IR Instance（如程序化地面），
- *   句柄侧编码成线上形态，Worker 解码复活后再编译。
+ * Both entry points append to the current scene rather than replacing it:
+ * - `loadGltf` passes asset-package bytes; parsing, placement and decoding all happen in the
+ *   Worker;
+ * - `loadInstances` passes a group of IR Instances built by the app on the main thread (e.g.
+ *   procedural ground); the handle encodes them into the wire form, and the Worker decodes,
+ *   revives and compiles them.
  */
 export interface ModelHandle {
     /**
-     * 追加一个 glTF 资产包里的全部 Instance。
+     * Appends every Instance in a glTF asset package.
      *
-     * `source` 是资产包字节：自包含 `.glb`、内嵌资源的 `.gltf`，或带
-     * `.bin` / 贴图的 `.zip`。URL 也由调用方自己 fetch 成 Blob 再传进来 ——
-     * 主线程只递字节，解析、解包和贴图解码都在 Worker。
+     * `source` is the asset-package bytes: a self-contained `.glb`, a `.gltf` with embedded
+     * resources, or a `.zip` with `.bin` files / textures. URLs are also fetched into a Blob by
+     * the caller — the main thread only passes bytes; parsing, unpacking and texture decoding
+     * all happen in the Worker.
      *
-     * `placement` 给整组实例再加一层摆放（语义同 `placeInstances`）。放在
-     * Worker 里做，主线程就不必为了摆一个模型先把它整个解析一遍。
+     * `placement` adds another layer of placement to the whole instance group (same semantics
+     * as `placeInstances`). Doing it in the Worker means the main thread does not have to parse
+     * an entire model just to place it.
      */
     loadGltf(source: Blob, placement?: InstancePlacement): Promise<void>;
     /**
-     * 追加一组外部构造好的 Instance。
+     * Appends a group of externally built Instances.
      *
-     * 典型用途是程序化几何（`MeshBuilder` 铺的地面等）：几何和材质在主线程
-     * 造好，跨线程时由 `Instance.encode` 编成裸数据，Worker 侧 `Instance.decode`
-     * 复活成 IR 类实例。贴图字段须是解码后的 `Image`（IR 里不留文件路径）。
+     * Typical use is procedural geometry (e.g. ground laid by `MeshBuilder`): geometry and
+     * materials are built on the main thread, `Instance.encode` turns them into raw data across
+     * the thread boundary, and `Instance.decode` revives them into IR class instances on the
+     * Worker side. Texture fields must be decoded `Image` objects (the IR keeps no file paths).
      *
-     * 一批一次请求：地面铺 9 块砖就是 9 个 Instance，但只编译一次。
+     * One request per batch: nine bricks of ground are nine Instances but compile only once.
      */
     loadInstances(instances: readonly Instance[]): Promise<void>;
-    /** 设置全场景发光几何的辐亮度倍率，默认 1。 */
+    /** Sets the radiance scale for all emissive geometry in the scene; defaults to 1. */
     setEmissionScale(scale: number): Promise<void>;
 }
 
 /**
- * 实现
+ * Implementation
  *
- * 以下内容不属于公开契约：消息形状、RPC 依赖和句柄实现。
+ * The following is not part of the public contract: message shapes, RPC dependencies and the
+ * handle implementation.
  */
 
-/** 模型相关的 Worker 消息。 */
+/** Worker messages related to models. */
 export type ModelRequest =
     | { type: 'model/loadGltf'; id: number; source: Blob; placement?: InstancePlacement }
     | { type: 'model/loadInstances'; id: number; instances: WireInstance[] }
     | { type: 'model/setEmissionScale'; id: number; scale: number };
 
-/** 模型句柄需要的最小 RPC 面：一次带返回值的请求。 */
+/** Minimal RPC surface the model handle needs: one request with a return value. */
 export interface ModelRpc {
     request<T>(build: (id: number) => ModelRequest): Promise<T>;
 }
 
-/** 模型句柄的主线程实现：把两个加载入口翻成带 id 的请求。 */
+/** Main-thread model handle: turns both loading entry points into requests with ids. */
 class RpcModel implements ModelHandle {
     constructor(private readonly rpc: ModelRpc) {}
 
@@ -96,7 +102,7 @@ class RpcModel implements ModelHandle {
     }
 }
 
-/** 主线程模型句柄的工厂：实现类不导出。 */
+/** Factory for the main-thread model handle; the implementation class is not exported. */
 export function createModel(rpc: ModelRpc): ModelHandle {
     return new RpcModel(rpc);
 }

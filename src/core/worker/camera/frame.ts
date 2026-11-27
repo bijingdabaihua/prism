@@ -7,58 +7,75 @@ import { PathTracePass } from './path-tracing/path-trace-pass';
 import { DisplayPass } from './display/display-pass';
 
 /**
- * 一帧的提交单元。
+ * The submission unit for one frame.
  *
- * 编排顺序是固定的：先路径追踪（写累加纹理），再显示（blit 到 canvas）。
- * 采样预算、游标推进都在 PathTracePass 内部；这里只负责把各段串起来，
- * 以及在两端打 GPU 时间戳。
+ * The order is fixed: path tracing first (writes the accumulation texture), then
+ * display (blit to the canvas). Sampling budget and cursor advancement stay inside
+ * PathTracePass; this file only chains the stages together and records GPU
+ * timestamps at both ends.
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * The file has two layers: contract (all exports) and implementation (no exports);
+ * see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ═════════════════ Contract layer (exports) ══════════════════
 
 /**
- * Frame 的类绑定：构造即装配路径追踪 / 显示两个 pass 和 GPU 计时器。
+ * Frame class binding: construction assembles the path-tracing and display passes
+ * and the GPU timer.
  *
- * 此处只有声明，赋值在实现层。
+ * This is only a declaration; the assignment is in the implementation layer.
  */
 export let Frame: {
     new (context: RenderContext, model: Model, camera: Camera, background: Background): Frame;
 };
 
-/** 一帧的提交单元：把路径追踪和显示两段串起来，两端打 GPU 时间戳。 */
+/**
+ * Submission unit for one frame: chains path tracing and display with GPU
+ * timestamps at both ends.
+ */
 export interface Frame {
-    /** 已提交的帧数。 */
+    /** Number of frames submitted. */
     frameCount(): number;
     /**
-     * 把画布上最近一次呈现的画面搬成位图。
+     * Copies the most recently presented image on the canvas into a bitmap.
      *
-     * 只有 OffscreenCanvas（Worker 里）支持；还没提交过任何一帧时返回 null，
-     * 调用方等下一次。
+     * Only supported by OffscreenCanvas (in the Worker); returns null when no frame
+     * has been submitted yet, and the caller waits for the next one.
      */
     capture(): ImageBitmap | null;
-    /** 每帧 GPU 预算（毫秒），由 RenderLoop 按实测显示器刷新率下发。 */
+    /**
+     * GPU budget per frame (milliseconds), set by RenderLoop from the measured
+     * display refresh rate.
+     */
     setTargetFrameMs(ms: number): void;
-    /** 上一帧是否重开了累积 —— 渲染循环据此在「响应 / 吞吐」两档预算间切换。 */
+    /**
+     * Whether the previous frame restarted accumulation — the render loop switches
+     * between the "responsive" and "throughput" budget tiers accordingly.
+     */
     restarted(): boolean;
     /**
-     * 这一帧还能不能提交。在途帧到上限就先跳过：队列越积越深会让测量断供，
-     * 采样量冻住不动（见 GpuTimer.canSubmit()）。
+     * Whether another frame can be submitted. Skip while in-flight frames are at the
+     * limit: a deeper queue starves the measurements and freezes the sample count
+     * (see GpuTimer.canSubmit()).
      */
     readyForNextFrame(): boolean;
     /**
-     * 提交一帧。先应用 canvas 尺寸变化（deferred resize：在 getCurrentTexture 之前），
-     * 尺寸为 0（canvas 尚未布局）时跳过整帧。返回是否实际提交了渲染。
+     * Submits one frame. Applies pending canvas size changes first (deferred resize,
+     * before getCurrentTexture); skips the whole frame when the size is 0 (canvas not
+     * laid out yet). Returns whether rendering was actually submitted.
      */
     renderFrame(): boolean;
     destroy(): void;
 }
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ════════════ Implementation layer (not exported) ═════════════
 
 class FrameImpl implements Frame {
-    /** 已提交的帧数 —— 相机靠它判断画布上有没有新画面可推。 */
+    /**
+     * Submitted frame count — the camera uses it to tell whether the canvas has a
+     * new image to push.
+     */
     private submittedFrames = 0;
     private readonly context: RenderContext;
     private readonly camera: Camera;
@@ -85,7 +102,7 @@ class FrameImpl implements Frame {
         try {
             return this.context.canvas().transferToImageBitmap();
         } catch {
-            // 画布还没呈现过任何一帧
+            // The canvas has not presented any frame yet
             return null;
         }
     }
@@ -129,5 +146,5 @@ class FrameImpl implements Frame {
     }
 }
 
-/** 契约层类绑定的赋值。 */
+/** Assignment of the contract-layer class binding. */
 Frame = FrameImpl;

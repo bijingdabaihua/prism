@@ -5,20 +5,24 @@ import { buildGlassStudy } from './glass-study';
 import { buildTiledGround } from './ground';
 
 /**
- * 装一个场景：机位 → 环境图 + 朝向 → 几何。
+ * Loads a scene: camera placement → environment map + orientation → geometry.
  *
- * 顺序是场景语义的一部分：机位先定构图，环境图决定光从哪里来，几何最后
- * 落地。Prism 侧是三个独立句柄，没有「整场景」接口；这个函数只是把业务层
- * 唯一那套顺序收在一处，渲染页调用它。
+ * The order is part of the scene's semantics: the camera placement sets the
+ * composition first, the environment map decides where the light comes from,
+ * and the geometry lands last. Prism exposes three independent handles with no
+ * "whole scene" interface; this function just collects the business layer's one
+ * canonical order in a single place, and the render page calls it.
  *
- * 清单是纯数据（`catalog.ts`），这里才开始碰导入器和网络 —— 画廊读卡片
- * 不会把 glTF / blend / 解码器拉进它的加载路径。
+ * The catalog is pure data (`catalog.ts`); importers and the network are only
+ * touched here — reading cards in the gallery never pulls glTF / blend /
+ * decoders into its load path.
  */
 export async function loadScene(prism: Prism, card: SceneCard): Promise<void> {
     prism.camera.set(card.setup.camera);
 
-    // 环境图以 Blob 交给 Worker：主线程只取字节，解码仍留在 Worker。
-    // setImage 从原图方向建好；场景需要别的朝向时再由 setRotation 转。
+    // The environment map reaches the Worker as a Blob: the main thread only
+    // fetches bytes, decoding stays in the Worker. setImage builds it in the
+    // source orientation; setRotation turns it when a scene needs another heading.
     if (card.setup.env === null) {
         const blackHdr = new Blob(['#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 2\n', new Uint8Array(8)]);
         await prism.background.setImage(blackHdr);
@@ -31,9 +35,12 @@ export async function loadScene(prism: Prism, card: SceneCard): Promise<void> {
 }
 
 /**
- * 按清单顺序装几何。程序化几何走实例入口：
- * - `tiled-ground`：主线程造好一批 Instance，一次请求推给 Worker；
- * - `gltf`：只递资产包字节，解析、贴图解码和摆位都在 Worker 里做。
+ * Loads geometry in catalog order. Procedural geometry goes through the
+ * instance entry point:
+ * - `tiled-ground`: the main thread builds a batch of Instances and sends them
+ *   to the Worker in one request;
+ * - `gltf`: only the asset package bytes are handed over; parsing, texture
+ *   decoding and placement all happen in the Worker.
  */
 async function loadGeometry(model: ModelHandle, geometry: readonly SceneGeometry[]): Promise<void> {
     for (const object of geometry) {
@@ -50,7 +57,7 @@ async function loadGeometry(model: ModelHandle, geometry: readonly SceneGeometry
     }
 }
 
-/** URL → Blob。Worker 里的解析以 Blob 为入口，取字节是调用方的事。 */
+/** URL → Blob. Parsing in the Worker starts from a Blob; fetching bytes is the caller's job. */
 async function fetchBlob(url: string): Promise<Blob> {
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`Failed to load ${url} (${resp.status})`);

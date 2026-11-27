@@ -8,113 +8,142 @@ import { vec3, normalize, cross, sub, add, scale } from '../../math/vec3';
 import { Mat4 } from '../../math/mat4';
 
 /**
- * 轨道相机：观察状态 + 它的 uniform buffer（112 B，布局见 structs.wgsl）+ 出图。
+ * Orbit camera: view state + its uniform buffer (112 B, layout in structs.wgsl) +
+ * image output.
  *
- * 内外一致：外面（CameraHandle）只有 `camera.listen` 能拿到画面，里面对应的
- * 渲染目标（RenderContext）和帧循环（RenderLoop）也都归相机 —— Engine 只是
- * 把模型、环境图、相机拼起来的组装根。
+ * Inside and out, the camera owns everything: the outside (CameraHandle) can only
+ * get frames through `camera.listen`, and the matching render target
+ * (RenderContext) and frame loop (RenderLoop) belong to the camera too — Engine is
+ * just the assembly root that wires model, environment map and camera together.
  *
- * 和 Background 一样是「一份状态 + 它的 GPU 镜像」：相机自己知道参数变化了
- * 没有，脏了就写 buffer，调用方只看返回值决定要不要重置累积。
+ * Like Background, it is "one piece of state + its GPU mirror": the camera knows
+ * whether its parameters changed, writes the buffer when dirty, and the caller only
+ * checks the return value to decide whether to reset accumulation.
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * The file has two layers: contract (all exports) and implementation (no exports);
+ * see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ═════════════════ Contract layer (exports) ══════════════════
 
 /**
- * 场景机位：场景作者指定的取景描述。
+ * Scene camera placement: the framing description specified by the scene author.
  *
- * 构图是场景的一部分 —— 同一个场景换一套参数就是另一张图，所以它由场景
- * 作者随场景一起给出。Camera 把这份描述变成轨道参数和 112 B uniform；
- * 之后鼠标怎么转，是观察者的事。
+ * Composition is part of the scene — the same scene with different parameters is a
+ * different image — so the scene author provides it along with the scene. Camera
+ * turns this description into orbit parameters and a 112 B uniform; how the mouse
+ * moves it afterwards is the viewer's business.
  *
- * 这也是 api（`CameraHandle.set` 的报文）和引擎共用的唯一一份定义。api 侧
- * 只以 `import type` 引用它，编译时擦除，不会把引擎运行时代码带进主线程包。
+ * This is also the single definition shared by the API (the `CameraHandle.set`
+ * message) and the engine. The API side references it only through `import type`,
+ * so it is erased at compile time and does not pull engine runtime code into the
+ * main-thread bundle.
  */
 export interface CameraView {
     target: { x: number; y: number; z: number };
-    /** 相机到 target 的距离（米，轨道半径） */
+    /** Distance from the camera to target (meters, orbit radius) */
     distance: number;
-    /** 水平角，π/2 表示从 +z 方向看过来 */
+    /** Horizontal angle; π/2 means looking from the +z direction */
     theta: number;
-    /** 俯仰角，π/2 是水平视线，越小相机越高 */
+    /** Pitch angle; π/2 is a horizontal view, and smaller values raise the camera */
     phi: number;
     /**
-     * 垂直视野角，弧度。水平视野 = 2·atan(tan(fovY/2) · 宽高比)，
-     * 所以它只管上下开口，左右跟着窗口走。
+     * Vertical field of view in radians. Horizontal FOV = 2·atan(tan(fovY/2) · aspect),
+     * so it controls only the vertical opening; the horizontal extent follows the window.
      */
     fovY: number;
     /**
-     * 入射光瞳半径（米）。省略或 0 = 针孔相机，没有景深。
+     * Entrance pupil radius (meters). Omitted or 0 = pinhole camera, no depth of field.
      *
-     * 这是镜头的物理尺寸，不是「虚化强度」：薄透镜只有两个自由度，光圈多大、
-     * 对焦在多远。f 值要自己按焦距换算（50 mm 镜头开 f/2.8，光瞳直径
-     * 17.9 mm，半径 8.9 mm）。
+     * This is the physical size of the lens, not a "blur strength": a thin lens has
+     * only two degrees of freedom, how wide the aperture is and how far it focuses.
+     * Convert the f-number from the focal length yourself (a 50 mm lens at f/2.8 has
+     * a 17.9 mm pupil diameter, 8.9 mm radius).
      */
     apertureRadius?: number;
     /**
-     * 对焦距离（米，沿视线从相机量起）。需要和 `apertureRadius` 一起给才生效。
+     * Focus distance (meters, measured from the camera along the view direction).
+     * Only takes effect together with `apertureRadius`.
      *
-     * 对焦是镜头的状态，不跟着鼠标轨道转 —— 观察者绕着场景转时，合焦面停在
-     * 场景作者定的那层深度上。
+     * Focus is a lens state, not something the mouse orbit turns — when the viewer
+     * orbits the scene, the focal plane stays at the depth the scene author chose.
      */
     focusDistance?: number;
 }
 
 /**
- * Camera 的类绑定：构造即开工 —— 建渲染目标、uniform、Frame 和帧循环。
+ * Camera class binding: construction starts work — it creates the render target,
+ * uniform, Frame and frame loop.
  *
- * 初始值只是占位：外部装场景时会用 `applyView` 覆盖掉。
- * 分辨率是渲染目标的事，但相机跟着它变，所以构造时订阅 canvas 尺寸变化。
+ * Initial values are just placeholders: the caller overwrites them with `applyView`
+ * when loading a scene. Resolution belongs to the render target, but the camera
+ * follows it, so the constructor subscribes to canvas size changes.
  *
- * 此处只有声明，赋值在实现层。
+ * This is only a declaration; the assignment is in the implementation layer.
  */
 export let Camera: {
     new (device: GPUDevice, canvas: OffscreenCanvas, model: Model, background: Background): Camera;
 };
 
 /**
- * 轨道相机：观察状态 + 它的 uniform buffer（112 B）+ 出图。
+ * Orbit camera: view state + its uniform buffer (112 B) + image output.
  *
- * 渲染目标（RenderContext）和帧循环（RenderLoop）都归相机 —— Engine 只是
- * 组装根。和 Background 一样是「一份状态 + 它的 GPU 镜像」：相机自己知道
- * 参数变化了没有，脏了就写 buffer，调用方只看 upload() 的返回值决定要不要
- * 重置累积。
+ * The render target (RenderContext) and frame loop (RenderLoop) belong to the
+ * camera — Engine is just the assembly root. Like Background, it is "one piece of
+ * state + its GPU mirror": the camera knows whether its parameters changed, writes
+ * the buffer when dirty, and the caller only checks upload()'s return value to
+ * decide whether to reset accumulation.
  */
 export interface Camera {
-    /** 112 B 机位 uniform（布局见 structs.wgsl）。 */
+    /** 112 B camera uniform (layout in structs.wgsl). */
     readonly buffer: GPUBuffer;
 
-    /** 参数变化（脏）时写入 uniform buffer；返回是否有变化。 */
+    /**
+     * Writes the uniform buffer when parameters changed (dirty); returns whether
+     * anything changed.
+     */
     upload(): boolean;
     /**
-     * 按间隔把当前画面推出去 —— 画面是相机的输出，所以推送也挂在相机上。
+     * Pushes the current image out at an interval — the image is the camera's
+     * output, so delivery hangs off the camera too.
      *
-     * 和主线程的 `CameraHandle.listen` 同一个语义：渲染比间隔慢时不重复推
-     * 同一帧。同一时刻只保留一个监听者，重复调用会替换旧的。
+     * Same semantics as the main thread's `CameraHandle.listen`: when rendering is
+     * slower than the interval, the same frame is not pushed twice. Only one
+     * listener is kept at a time; calling again replaces the old one.
      */
     startListening(intervalMs: number, onFrame: (frame: ImageBitmap) => void): void;
     stopListening(): void;
-    /** 提交一帧（渲染循环驱动）。 */
+    /** Submits one frame (driven by the render loop). */
     renderFrame(): boolean;
-    /** 这一帧还能不能提交 —— 渲染循环的节流判断。 */
+    /** Whether another frame can be submitted — the render loop's throttle check. */
     readyForNextFrame(): boolean;
-    /** 上一帧是否重开了累积 —— 渲染循环据此切换采样预算档位。 */
+    /**
+     * Whether the previous frame restarted accumulation — the render loop switches
+     * sampling-budget tiers accordingly.
+     */
     restarted(): boolean;
-    /** 每帧 GPU 预算（毫秒）—— 渲染循环通过 FrameSource 结构类型调到。 */
+    /**
+     * GPU budget per frame (milliseconds) — called by the render loop through the
+     * FrameSource structural type.
+     */
     setTargetFrameMs(ms: number): void;
     vpMatrix(): Mat4;
     invViewProj(): Mat4;
     /**
-     * 整套机位一次装进来：场景机位、运镜关键帧都走这一条。
+     * Loads a whole camera placement at once: scene placements and camera-move
+     * keyframes both go through this.
      *
-     * 近远平面跟着距离走，外部只报距离。没有「按包围盒自动取景」这条退路：
-     * 自动取景在画廊里永远是错的构图 —— 相机会退到刚好看全整个场景的地方，
-     * 而画廊要的是场景作者选的那一格。
+     * Near and far planes follow the distance; the caller only reports distance.
+     * There is no "frame the bounding box automatically" fallback: auto-framing is
+     * always the wrong composition for the gallery — the camera backs off until the
+     * whole scene just fits, while the gallery wants the framing the scene author
+     * picked.
      */
     applyView(view: CameraView): void;
-    /** 视口尺寸（物理像素）—— 主线程量好送进来，画布、相机和各 pass 一起变。 */
+    /**
+     * Viewport size (physical pixels) — measured by the main thread and sent in;
+     * canvas, camera and all passes change together.
+     */
     setSize(width: number, height: number): void;
     orbitTheta(delta: number): void;
     orbitPhi(delta: number): void;
@@ -123,11 +152,11 @@ export interface Camera {
     destroy(): void;
 }
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ════════════ Implementation layer (not exported) ═════════════
 
 class CameraImpl implements Camera {
     public readonly buffer: GPUBuffer;
-    /** 正在往哪里推画面；null = 没人监听。 */
+    /** Where images are being pushed to; null = no listener. */
     private listener: Listener | null = null;
     private listenTimer: ReturnType<typeof setTimeout> | null = null;
     private dirty = true;
@@ -136,9 +165,9 @@ class CameraImpl implements Camera {
     private theta = 0;
     private phi = Math.PI / 3;
     private fovYRads = (60 * Math.PI) / 180;
-    /** 入射光瞳半径（米）。0 = 针孔。 */
+    /** Entrance pupil radius (meters). 0 = pinhole. */
     private apertureRadius = 0;
-    /** 对焦距离（米）。0 = 无穷远。 */
+    /** Focus distance (meters). 0 = infinity. */
     private focusDistance = 0;
     private aspect = 16 / 9;
     private near = 0.01;
@@ -146,11 +175,14 @@ class CameraImpl implements Camera {
     private renderWidth = 800;
     private renderHeight = 600;
     private readonly device: GPUDevice;
-    /** 渲染目标 —— 相机出的图落在这块画布上。 */
+    /** Render target — images from the camera land on this canvas. */
     private readonly context: RenderContext;
-    /** 相机的渲染器；画面只从这里出。 */
+    /** The camera's renderer; images come only from here. */
     private readonly frame: Frame;
-    /** 帧循环：什么时候再渲染一帧、每帧多少预算，也由相机管。 */
+    /**
+     * Frame loop: when to render the next frame and how much budget each frame
+     * gets are also owned by the camera.
+     */
     private readonly loop: RenderLoop;
 
     constructor(device: GPUDevice, canvas: OffscreenCanvas, model: Model, background: Background) {
@@ -181,7 +213,7 @@ class CameraImpl implements Camera {
         f32[18] = eye.z;
         f32[19] = 1.0;
 
-        // vec4 resolution：只用得到 x、y，zw 留空
+        // vec4 resolution: only x and y are used; zw are left empty
         f32[20] = this.renderWidth;
         f32[21] = this.renderHeight;
 
@@ -294,7 +326,8 @@ class CameraImpl implements Camera {
                 }
             }
         } finally {
-            // 回调里可能已经取消了监听：只有还挂着才排下一次
+            // The callback may have cancelled listening: schedule the next one
+            // only if still attached
             if (this.listener === listener) {
                 this.listenTimer = setTimeout(() => this.deliver(listener), listener.intervalMs);
             }
@@ -313,7 +346,10 @@ class CameraImpl implements Camera {
         );
     }
 
-    /** 机位四元组：目标点 + 距离 + 两个角。近远平面跟着距离走。 */
+    /**
+     * Camera placement tuple: target + distance + two angles. Near and far planes
+     * follow the distance.
+     */
     private setView(target: Vec3, distance: number, theta: number, phi: number): void {
         this.target = target;
         this.orbitDist = Math.max(distance, 0.01);
@@ -330,10 +366,12 @@ class CameraImpl implements Camera {
     }
 
     /**
-     * 镜头：光圈半径 + 对焦距离，两个都是米。任一个为 0 就退回针孔。
+     * Lens: aperture radius + focus distance, both in meters. Either one at 0 falls
+     * back to a pinhole.
      *
-     * 单位是米而不是 f 值，因为引擎不知道传感器多大 —— 焦距只活在 fovY 里。
-     * 场景作者要把「50 mm 开 f/2.8」换成年半径，那是取景的问题，不是渲染的问题。
+     * The unit is meters rather than an f-number because the engine does not know
+     * the sensor size — focal length lives only in fovY. Converting "50 mm at
+     * f/2.8" to a radius in meters is a framing concern, not a rendering one.
      */
     private setLens(apertureRadius: number, focusDistance: number): void {
         this.apertureRadius = Math.max(0, apertureRadius);
@@ -345,9 +383,9 @@ class CameraImpl implements Camera {
 interface Listener {
     readonly intervalMs: number;
     readonly onFrame: (frame: ImageBitmap) => void;
-    /** 上一次推出去的是第几帧。 */
+    /** Which frame was pushed last. */
     lastSent: number;
 }
 
-/** 契约层类绑定的赋值。 */
+/** Assignment of the contract-layer class binding. */
 Camera = CameraImpl;

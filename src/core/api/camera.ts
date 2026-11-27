@@ -1,71 +1,79 @@
 import type { CameraView } from '../worker/camera/camera';
 
 /**
- * 主线程相机句柄：契约 + 实现。
+ * Main-thread camera handle: contract + implementation.
  *
- * Worker 里的 `../worker/camera.ts` 才是真的机位；这边只把方法翻成消息。
- * 机位报文形状用本文件 re-export 的共享 `CameraView`（定义在 `../worker/camera.ts`），
- * 两边只有一份定义。创建入口是 `createCamera(rpc)`，实现类不导出。
+ * The real camera lives in `../worker/camera.ts`; this side only turns methods into messages.
+ * The camera message shape re-exports the shared `CameraView` (defined in `../worker/camera.ts`),
+ * so there is a single definition. The factory is `createCamera(rpc)`; the implementation class
+ * is not exported.
  */
 
 /**
- * 公开契约
+ * Public contract
  *
- * 以下类型和接口是对外 API。修改前先确认调用方影响。
+ * The types and interfaces below are the external API. Check caller impact before changing.
  */
 
 export type { CameraView } from '../worker/camera/camera';
 
-/** 渲染视口尺寸（物理像素 = CSS 尺寸 × devicePixelRatio）。 */
+/** Render viewport size (physical pixels = CSS size × devicePixelRatio). */
 export interface ViewportSize {
     width: number;
     height: number;
 }
 
 /**
- * 相机句柄 —— 所有方法都是同步的，调用即返回，不等帧。
+ * Camera handle — all methods are synchronous: they return immediately and do not wait for a frame.
  *
- * 宽高比是投影的一部分，所以尺寸挂在相机上（`resize`），而不是画布上：
- * 相机不知道自己画到哪块画布，只知道画面有多宽。
+ * Aspect ratio is part of projection, so size belongs to the camera (`resize`), not the canvas:
+ * the camera does not know which canvas it draws to, only how wide the image is.
  *
- * 角度单位一律是弧度，位移单位一律是屏幕像素 —— 前者是相机语义，后者
- * 直接接指针事件，中间的手感系数（比如每像素转多少弧度）留在业务层。
+ * Angles are always in radians, translations are always in screen pixels — the former is camera
+ * semantics, the latter maps directly to pointer events. The feel coefficient in between (e.g.
+ * radians per pixel) stays in the app layer.
  */
 export interface CameraHandle {
     /**
-     * 直接指定机位（完整一格，不是增量）。
+     * Sets the camera placement directly (a full frame, not a delta).
      *
-     * 外部装场景的顺序通常是 `set` → `background.setImage` /
-     * `background.setRotation` → `scene.load`；装载几何不会改机位。
+     * The usual order for assembling a scene is `set` → `background.setImage` /
+     * `background.setRotation` → `scene.load`; loading geometry does not change the camera.
      */
     set(spec: CameraView): void;
-    /** 视口尺寸（物理像素）。宽高比跟着它走。 */
+    /** Viewport size (physical pixels). Aspect ratio follows it. */
     resize(size: ViewportSize): void;
-    /** 绕 target 旋转，单位弧度。phi 夹在 (0, π) 之间，翻不过头顶。 */
+    /**
+     * Orbits around the target in radians. phi is clamped to (0, π), so it cannot flip over
+     * the top.
+     */
     orbit(deltaTheta: number, deltaPhi: number): void;
-    /** 推拉：>1 拉远，<1 推近。乘性，拖多远都是等比例。 */
+    /** Dolly: >1 moves out, <1 moves in. Multiplicative, so any drag distance is proportional. */
     zoom(factor: number): void;
-    /** 平移 target，单位是屏幕像素 —— 直接接指针的位移。 */
+    /** Pans the target in screen pixels — fed directly from pointer movement. */
     pan(deltaX: number, deltaY: number): void;
     /**
-     * 按间隔把当前画面推回来 —— 画面是相机的输出，所以挂在相机上。
+     * Pushes the current frame back at an interval — the frame is the camera's output,
+     * so this belongs on the camera.
      *
-     * 每 `intervalMs` 毫秒最多推一帧；渲染比它慢就等下一帧，不重复推同一张。
-     * 推回来的是 `ImageBitmap`：主线程用 bitmaprenderer 的
-     * `transferFromImageBitmap()` 直接贴上去，不经过读回和编码。
+     * Pushes at most one frame per `intervalMs`; if rendering is slower, it waits for the next
+     * frame and does not push the same image twice. The frame is an `ImageBitmap`: the main
+     * thread pastes it directly with bitmaprenderer's `transferFromImageBitmap()`, with no
+     * readback or encoding.
      *
-     * 返回取消函数。同一时刻只允许一个监听者。
+     * Returns a cancel function. Only one listener is allowed at a time.
      */
     listen(intervalMs: number, onFrame: (frame: ImageBitmap) => void): () => void;
 }
 
 /**
- * 实现
+ * Implementation
  *
- * 以下内容不属于公开契约：消息形状、RPC 依赖和句柄实现。
+ * The following is not part of the public contract: message shapes, RPC dependencies and the
+ * handle implementation.
  */
 
-/** 机位命令：全部是「照做」的写操作，没有返回值。 */
+/** Camera commands: all fire-and-forget write operations with no return value. */
 export type CameraCommand =
     | { type: 'set'; spec: CameraView }
     | { type: 'resize'; size: ViewportSize }
@@ -73,24 +81,28 @@ export type CameraCommand =
     | { type: 'zoom'; factor: number }
     | { type: 'pan'; deltaX: number; deltaY: number };
 
-/** 相机相关的 Worker 消息。 */
+/** Worker messages related to the camera. */
 export type CameraRequest =
     | { type: 'camera'; command: CameraCommand }
-    /** 开始按间隔把画面推回主线程。 */
+    /** Starts pushing frames back to the main thread at an interval. */
     | { type: 'listen/start'; intervalMs: number }
     | { type: 'listen/stop' };
 
 /**
- * 相机句柄需要的最小 RPC 面。
+ * The minimal RPC surface the camera handle needs.
  *
- * 不依赖 RpcClient 具体类，只要求能发消息、能挂帧回调。
+ * Does not depend on a concrete RpcClient class; it only requires sending messages and
+ * registering a frame callback.
  */
 export interface CameraRpc {
     send(request: CameraRequest): void;
     setFrameHandler(handler: ((bitmap: ImageBitmap) => void) | null): void;
 }
 
-/** 相机句柄的主线程实现：每条命令原样转给 Worker，不等回执。 */
+/**
+ * Main-thread camera handle: forwards each command to the Worker and does not wait
+ * for an acknowledgement.
+ */
 class RpcCamera implements CameraHandle {
     private listener: ((frame: ImageBitmap) => void) | null = null;
 
@@ -117,7 +129,7 @@ class RpcCamera implements CameraHandle {
     }
 
     public listen(intervalMs: number, onFrame: (frame: ImageBitmap) => void): () => void {
-        if (this.listener) throw new Error('camera.listen：已经有一个监听者');
+        if (this.listener) throw new Error('camera.listen: a listener is already registered');
         this.listener = onFrame;
         this.rpc.setFrameHandler(onFrame);
         this.rpc.send({ type: 'listen/start', intervalMs });
@@ -128,13 +140,13 @@ class RpcCamera implements CameraHandle {
             try {
                 this.rpc.send({ type: 'listen/stop' });
             } catch {
-                // 已经 dispose：Worker 都没了，不用停
+                // Already disposed: the Worker is gone, so there is nothing to stop
             }
         };
     }
 }
 
-/** 主线程相机句柄的工厂：实现类不导出。 */
+/** Factory for the main-thread camera handle; the implementation class is not exported. */
 export function createCamera(rpc: CameraRpc): CameraHandle {
     return new RpcCamera(rpc);
 }

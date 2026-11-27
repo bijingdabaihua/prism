@@ -2,10 +2,10 @@ import { Instance } from '../core/worker/model/instance';
 import { PBRMaterial } from '../core/worker/model/material/material';
 import { MeshBuilder } from '../core/worker/model/mesh';
 
-/** 发光面板照亮地面，方块挡住部分光线。 */
+/** An emissive panel lights the ground while a block occludes part of the light. */
 export let buildEmissionStudy: () => Instance[];
 
-// ═══════════════════════ 实现层（不导出） ═══════════════════════
+// ═════════ Implementation layer (not exported) ══════════
 
 buildEmissionStudy = () => {
     const builder = new MeshBuilder();
@@ -16,7 +16,7 @@ buildEmissionStudy = () => {
     };
     quad([-8, 0, 8], [8, 0, 8], [8, 0, -8], [-8, 0, -8], 0);
 
-    // 倾斜面板，低边朝向方块。表面两侧都发光。
+    // Tilted panel, low edge facing the block. Both faces emit.
     quad([-1.65, 1.65, -0.55], [-1.65, 1.65, 0.55], [-0.95, 1.05, 0.55], [-0.95, 1.05, -0.55], 1);
 
     const a: Point = [-0.34, 0, 0.34];

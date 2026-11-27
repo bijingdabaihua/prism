@@ -11,98 +11,129 @@ import shade from './shade.wgsl?raw';
 import main from './main.wgsl?raw';
 
 /**
- * 路径追踪 compute pass。
+ * Path-tracing compute pass.
  *
- * 每帧只采样屏幕的一部分像素：顺序表是 0..W*H-1 的随机排列，游标从表头开始
- * 每帧取连续的一段，一轮正好覆盖每个像素一次。dispatch 是 1D 的 —— 一个线程
- * 对应表里的一个像素，采样量由 GPU 实测耗时自适应（见 reportFrameTime）。
+ * Each frame samples only a subset of screen pixels: the order table is a random
+ * permutation of 0..W*H-1, and the cursor takes a contiguous run from its head
+ * each frame, so one sweep covers every pixel exactly once. Dispatch is 1D — one
+ * thread maps to one pixel in the table, and the sample count adapts to measured
+ * GPU time (see reportFrameTime).
  *
- * 累加平均的分母不需要逐像素存储：顺序表每跨过 W*H 个采样，所有像素恰好
- * 各多采一次，所以「该像素之前采过几次」= 已完成轮数 (+ 本帧是否跨轮)。
+ * The running-average denominator doesn't need per-pixel storage: every time the
+ * order table advances past W*H samples, all pixels have been sampled exactly once
+ * more, so "how many times this pixel was sampled before" = completed sweeps
+ * (+ whether this frame crosses a sweep boundary).
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * The file has two layers: contract (all exports) and implementation (no exports);
+ * see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ═════════════════ Contract layer (exports) ══════════════════
 
 /**
- * PathTracePass 的类绑定：构造即建环境图采样器和设备级资源（pipeline / bgl /
- * uniform），尺寸相关资源等首帧 resize 再懒建。
+ * Class binding for PathTracePass. Construction builds the environment-map sampler
+ * and device-level resources (pipeline / bgl / uniform); size-dependent resources
+ * are created lazily on the first resize.
  *
- * 此处只有声明，赋值在实现层。
+ * Declaration only; the assignment lives in the implementation layer.
  */
 export let PathTracePass: {
     new (context: RenderContext, model: Model, cameraUniform: GPUBuffer, background: Background): PathTracePass;
 };
 
-/** 路径追踪 compute pass：每帧采样屏幕的一部分像素，累加进 ping-pong 纹理。 */
+/**
+ * Path-tracing compute pass: samples a subset of screen pixels each frame and
+ * accumulates into ping-pong textures.
+ */
 export interface PathTracePass {
-    /** 当前要显示的累积视图；还没有就返回 null。 */
+    /** Accumulation view to display; returns null if there isn't one yet. */
     radianceView(): GPUTextureView | null;
-    /** 累积纹理每重建一次就加一；DisplayPass 靠它判断 blit bind group 是否过期。 */
+    /**
+ * Increments whenever the accumulation textures are rebuilt; DisplayPass uses it
+ * to tell whether the blit bind group is stale.
+ */
     radianceVersion(): number;
-    /** 上一帧是否重开了累积（相机 / 场景 / 尺寸变化）。 */
+    /** Whether the last frame restarted accumulation (camera / scene / size change). */
     restarted(): boolean;
-    /** 本帧实际调度的像素数（预算控制器读取）。 */
+    /** Number of pixels actually dispatched this frame (read by the budget controller). */
     lastDispatch(): number;
-    /** 每帧 GPU 预算（毫秒）。RenderLoop 按实测刷新率下发。 */
+    /** Per-frame GPU budget (ms). RenderLoop sets it from the measured refresh rate. */
     setTargetFrameMs(ms: number): void;
     /**
-     * GPU 实测耗时回调（异步，通常比提交晚 1–2 帧）。
+     * Callback for measured GPU time (asynchronous, usually 1–2 frames behind submission).
      *
-     * @param samplingMs 本帧「拷贝 + compute」的 GPU 时间
-     * @param measuredDispatch 测量那一帧实际调度的像素数
+     * @param samplingMs GPU time for this frame's copy + compute
+     * @param measuredDispatch pixels actually dispatched in the measured frame
      *
-     * 用**比例**而不是成本模型：这一帧花了多少毫秒，就按「目标 ÷ 实测」去乘采样量。
+     * Uses a **ratio** rather than a cost model: take how many milliseconds this
+     * frame spent and scale the sample count by target / measured.
      *
-     * 之前按「预算 ÷ 每像素成本」直接算出目标值，等于假设耗时与采样量成正比。
-     * 但每帧还有一项与采样量无关的固定开销 —— 全屏拷贝累积纹理（部分采样时
-     * 未被抽中的像素要从读纹理搬过去）和显示 blit。它在采样量小的时候摊到每个
-     * 像素上，把成本估高，估高又让采样量更小、摊得更多 —— 正反馈，一路滑到
-     * MIN_DISPATCH 就锁死。比例控制天然带上这一项：它收敛到「实测 ≈ 预算」，
-     * 固定开销自动被让出来，不需要知道它有多大。
+     * The old code computed a target directly as budget / per-pixel cost, assuming
+     * time is proportional to sample count. But each frame also has fixed overhead
+     * independent of sample count — the full-screen copy of the accumulation
+     * textures (under partial sampling, pixels not selected must be carried over
+     * from the read texture) and the display blit. At low sample counts this is
+     * spread across every pixel, inflating the cost estimate, which in turn lowers
+     * the sample count and spreads it further — positive feedback that slides all
+     * the way down to MIN_DISPATCH and sticks there. Ratio control accounts for
+     * this term naturally: it converges to measured ≈ budget, and the fixed
+     * overhead is yielded automatically without needing to know its size.
      *
-     * 单帧最多挪动 2 倍；一次坏测量只造成两倍的偏差，下一帧就被实测纠正回来。
+     * Moves at most 2x per frame; one bad measurement causes only a 2x deviation,
+     * and the next frame's measurement corrects it.
      */
     reportFrameTime(samplingMs: number, measuredDispatch: number): void;
     /**
-     * 往 encoder 里录这一帧：按需重建累积纹理 / bind group，重置或拷贝累加器，
-     * 写 uniform，dispatch 采样线程。cameraChanged 时清空累积从头采。
+     * Records this frame into the encoder: rebuilds accumulation textures / bind
+     * groups as needed, resets or copies the accumulator, writes uniforms, and
+     * dispatches the sampling threads. Clears accumulation and restarts when
+     * cameraChanged is set.
      */
     record(encoder: GPUCommandEncoder, cameraChanged: boolean): void;
     destroy(): void;
 }
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ════════════ Implementation layer (not exported) ═════════════
 
-/** 每帧至少采样的像素数（再慢也不低于这个，保证拖动时画面不是全黑）。 */
+/**
+ * Minimum pixels sampled per frame; never go below this so the image isn't
+ * fully black while dragging.
+ */
 const MIN_DISPATCH = 4096;
-/** 1D dispatch 的 workgroup 大小。 */
+/** Workgroup size for the 1D dispatch. */
 const WORKGROUP_SIZE = 64;
-/** dispatchWorkgroups 的单维上限是 65535，这里换算成像素数。 */
+/** The single-dimension limit of dispatchWorkgroups is 65535; converted to pixels here. */
 const MAX_DISPATCH = 65535 * WORKGROUP_SIZE;
-/** GPU 实测耗时还没回来之前用的帧预算（约 60Hz 的 75%）。 */
+/** Frame budget used before measured GPU time arrives (about 75% of 60 Hz). */
 const DEFAULT_TARGET_MS = 12.5;
-/** 显示 blit + 提交间隙的固定预留（毫秒），从每帧预算里先扣掉。 */
+/**
+ * Fixed reserve for the display blit and submission gap (ms), subtracted from the
+ * per-frame budget up front.
+ */
 const FIXED_RESERVE_MS = 0.5;
 
 const SHADER = [structs, aabb, intersect, bvh, shade, main].join('\n');
 
 class PathTracePassImpl implements PathTracePass {
-    /** 累积纹理每重建一次就加一；DisplayPass 靠它判断 blit bind group 是否过期。 */
+    /**
+ * Increments whenever the accumulation textures are rebuilt; DisplayPass uses it
+ * to tell whether the blit bind group is stale.
+ */
     private version = 0;
     /**
-     * 本帧是否重开了累积（相机/场景/尺寸变化）。
+     * Whether accumulation restarted this frame (camera/scene/size change).
      *
-     * 渲染循环据此在「响应」和「吞吐」两档预算间切换：画面正在被改动时延迟要紧，
-     * 静止累积时吞吐要紧。用「累积是否被重置」而不是「相机是否动了」来表达，
-     * 是因为循环不该认识相机 —— 任何让画面从头再来的原因都该走同一条路。
+     * The render loop uses this to switch between "responsive" and "throughput"
+     * budgets: latency matters while the image is changing, throughput matters
+     * while accumulation is static. It is expressed as "was accumulation reset"
+     * rather than "did the camera move" because the loop should not know about the
+     * camera — anything that restarts the image should take the same path.
      */
     private restartedThisFrame = false;
     private width = 0;
     private height = 0;
     private pixelCount = 0;
-    /** onResize 只置脏；真正的重建推迟到下一次 record()。 */
+    /** onResize only sets a dirty flag; the actual rebuild is deferred to the next record(). */
     private resizeDirty = false;
     private pipeline?: GPUComputePipeline;
     private bgl?: GPUBindGroupLayout;
@@ -111,28 +142,37 @@ class PathTracePassImpl implements PathTracePass {
     private accumViews: [GPUTextureView?, GPUTextureView?] = [undefined, undefined];
     private accumIndex = 0;
     private currentWriteView: GPUTextureView | null = null;
-    /** 像素采样顺序表（0..pixelCount-1 的随机排列），resize 时重建。 */
+    /** Pixel sampling order table (a random permutation of 0..pixelCount-1), rebuilt on resize. */
     private orderBuf?: GPUBuffer;
-    /** Ping-pong bind group，按当前写索引取。 */
+    /** Ping-pong bind groups, selected by the current write index. */
     private bindGroups: [GPUBindGroup?, GPUBindGroup?] = [undefined, undefined];
-    /** 建这批 bind group 时环境图的版本号；和 Background.version() 不一致就重建。 */
+    /**
+ * Environment-map version when this batch of bind groups was built; rebuild if it
+ * differs from Background.version().
+ */
     private bindGroupEnvVersion = -1;
-    /** 建这批 bind group 时场景资源的版本号；Model 追加实例后会变。 */
+    /**
+ * Scene-resource version when this batch of bind groups was built; changes when
+ * Model appends instances.
+ */
     private bindGroupModelVersion = -1;
-    /** 每个缓存 bind group 创建时对应的写视图 —— 视图换了说明纹理重建过。 */
+    /**
+ * Write view each cached bind group was created against — a different view means
+ * the textures were rebuilt.
+ */
     private bindGroupWriteViews: [GPUTextureView?, GPUTextureView?] = [undefined, undefined];
-    /** 当前轮内已采样的像素数，[0, pixelCount)。 */
+    /** Pixels sampled so far in the current sweep, in [0, pixelCount). */
     private cursor = 0;
-    /** 已完成的整轮数 —— 每个像素的样本数下界。 */
+    /** Completed full sweeps — a lower bound on each pixel's sample count. */
     private sweep = 0;
-    /** 帧序号：只喂 LDS 随机序列，不参与累加平均。 */
+    /** Frame index: feeds only the LDS random sequence, not the running average. */
     private frameIndex = 1;
-    /** 本帧要调度的像素数，由 GPU 实测耗时自适应。 */
+    /** Pixels to dispatch this frame, adapted from measured GPU time. */
     private dispatchTarget = MIN_DISPATCH;
     private lastDispatched = 0;
-    /** 每帧 GPU 预算（毫秒），由 RenderLoop 按显示器刷新率下发。 */
+    /** Per-frame GPU budget (ms), set by RenderLoop from the display refresh rate. */
     private targetFrameMs = DEFAULT_TARGET_MS;
-    /** 下一帧清空累加缓冲并从头开始采样。 */
+    /** Clears the accumulation buffer next frame and restarts sampling from the beginning. */
     private resetPending = false;
     private lastEmissionScale = 1;
     private readonly context: RenderContext;
@@ -140,13 +180,17 @@ class PathTracePassImpl implements PathTracePass {
     private readonly cameraUniform: GPUBuffer;
     private readonly background: Background;
     private readonly textures: TextureSet;
-    /** 环境图采样器：u 环绕、v 夹边，与材质贴图那个 repeat/repeat 分开。 */
+    /**
+ * Environment-map sampler: u wraps, v clamps, kept separate from the material
+ * textures' repeat/repeat sampler.
+ */
     private readonly envSampler: GPUSampler;
     /**
-     * 路径弹射次数上限，写入 shader uniform（u.max_bounces）。
+     * Maximum path bounces, written to the shader uniform (u.max_bounces).
      *
-     * 这只是安全上限：shader 里在第 4 次弹射之后开俄罗斯轮盘赌，正常路径
-     * 按吞吐量自己决定要不要继续。设成 12 是为了防止极端情况下的死循环。
+     * This is only a safety cap: the shader starts Russian roulette after the 4th
+     * bounce, and a normal path decides for itself whether to continue based on
+     * throughput. 12 guards against infinite loops in extreme cases.
      */
     private readonly maxBounces = 12;
 
@@ -156,8 +200,9 @@ class PathTracePassImpl implements PathTracePass {
         this.cameraUniform = cameraUniform;
         this.background = background;
         this.textures = model.textures();
-        // 环境图采样：u 环绕、v 夹边。v 是极角，用 repeat 会把北极绕到南极去。
-        // 只有按粗糙度取 mip 的那条路用它，NEE 仍是纹素精确的 textureLoad。
+        // Environment-map sampling: u wraps, v clamps. v is the polar angle, so
+        // repeat would wrap the north pole onto the south. Only the roughness-based
+        // mip lookup uses this sampler; NEE still uses texel-exact textureLoad.
         this.envSampler = context.device.createSampler({
             magFilter: 'linear',
             minFilter: 'linear',
@@ -165,11 +210,13 @@ class PathTracePassImpl implements PathTracePass {
             addressModeU: 'repeat',
             addressModeV: 'clamp-to-edge',
         });
-        // onResize 只置脏标记，重建推迟到 record()（回调里不做 GPU 工作）
+        // onResize only sets a dirty flag; the rebuild is deferred to record()
+        // (no GPU work in the callback)
         context.onResize(() => {
             this.resizeDirty = true;
         });
-        // 设备级资源（pipeline/bgl/uniform）构造时一次性创建，device 生命周期内不变
+        // Device-level resources (pipeline/bgl/uniform) are created once at
+        // construction and don't change for the device's lifetime
         this.rebuildDeviceResources();
     }
 
@@ -210,7 +257,9 @@ class PathTracePassImpl implements PathTracePass {
 
         this.restartedThisFrame = false;
 
-        // resize 脏标记 → 重建累积纹理（尺寸相关的纹理按需懒创建，首帧由 onResize 置脏触发）
+        // Resize dirty flag → rebuild accumulation textures (size-dependent
+        // textures are created lazily; the first frame triggers it via onResize
+        // setting the flag)
         if (this.resizeDirty) {
             this.resizeDirty = false;
             this.width = this.context.width();
@@ -220,23 +269,29 @@ class PathTracePassImpl implements PathTracePass {
         }
         if (!this.width || !this.height) return;
 
-        // 外部按「机位 → 环境图 → 几何」装场景，任一样还没到就画不了：没有光源，
-        // 或者 Model、材质、贴图还没编译，bind group 建不起来。
+        // The scene is assembled externally in the order camera placement →
+        // environment map → geometry; if any is missing we can't render: no light
+        // source, or the Model, materials and textures haven't compiled, so bind
+        // groups can't be built.
         if (!bg.hasEnvironment() || !this.model.ready()) return;
 
-        // 相机动了 → 清空累加、游标归零（采样预算保留，成本没有变）
+        // Camera moved → clear accumulation, reset the cursor (the sampling budget
+        // is kept since cost hasn't changed)
         const emissionScale = this.model.emissionScale();
         if (cameraChanged || emissionScale !== this.lastEmissionScale) this.requestReset();
         this.lastEmissionScale = emissionScale;
 
-        // bind group 在四种情况下重建：还没建过、累积纹理被 resize 换成了新视图
-        // （两张 ping-pong 是新旧视图各建一次，命中任一即说明整批都过期了）、
-        // 环境图换了（旧纹理已 destroy，绑定必须跟着换），或场景追加了实例
-        // （几何 / 材质 / 实例 buffer 都换成了新的一批）。
+        // Bind groups are rebuilt in four cases: none exist yet; resize replaced the
+        // accumulation textures with new views (the two ping-pong groups capture
+        // the views at build time, so a mismatch on either means the whole batch is
+        // stale); the environment map changed (the old texture was destroyed and
+        // bindings must follow); or the scene appended instances (geometry /
+        // material / instance buffers were all swapped for a new set).
         const envChanged = this.bindGroupEnvVersion !== bg.version();
         const modelChanged = this.bindGroupModelVersion !== this.model.version();
         if (!this.bindGroups[0] || this.bindGroupWriteViews[0] !== this.accumViews[0] || envChanged || modelChanged) {
-            // 光照或场景变了，旧累积已经没有意义；首次建 bind group 时还没有样本
+            // Lighting or scene changed, so the old accumulation is meaningless; on
+            // the first bind-group build there are no samples yet
             if ((envChanged || modelChanged) && this.bindGroups[0]) this.requestReset();
             this.rebuildBindGroups();
         }
@@ -247,7 +302,8 @@ class PathTracePassImpl implements PathTracePass {
         const readIndex = 1 - writeIndex;
 
         if (this.resetPending) {
-            // 相机/内容变化：两张都清黑，游标归零，从顺序表开头重新铺。
+            // Camera/content change: clear both to black, reset the cursor, and
+            // restart from the head of the order table.
             this.resetPending = false;
             this.restartedThisFrame = true;
             this.cursor = 0;
@@ -270,9 +326,11 @@ class PathTracePassImpl implements PathTracePass {
             });
             pass.end();
         } else if (n < this.pixelCount) {
-            // 本帧只有 n 个像素会被写；其余像素必须先从读纹理拷过来，
-            // 否则写入目标里它们仍是两帧前的旧值（画面会出现空洞/闪烁）。
-            // 预算涨到整屏时每个像素都会重写，这一整张拷贝可以省掉。
+            // Only n pixels are written this frame; the rest must be copied over from
+            // the read texture, otherwise they'd stay at their value from two frames
+            // ago in the destination (holes/flicker in the image). Once the budget
+            // grows to a full screen every pixel is rewritten, so this whole copy is
+            // skipped.
             encoder.copyTextureToTexture(
                 { texture: this.accumTextures[readIndex]!, origin: { x: 0, y: 0 } },
                 { texture: this.accumTextures[writeIndex]!, origin: { x: 0, y: 0 } },
@@ -280,7 +338,7 @@ class PathTracePassImpl implements PathTracePass {
             );
         }
 
-        // 每帧都重写 uniform（游标/轮数/预算在变，缓存反而更贵）
+        // Rewrite uniforms every frame (cursor, sweep and budget change; caching would cost more)
         const buf = new ArrayBuffer(48);
         const uni = new Uint32Array(buf);
         uni[0] = this.width;
@@ -304,7 +362,7 @@ class PathTracePassImpl implements PathTracePass {
         this.accumIndex = readIndex;
         this.lastDispatched = n;
 
-        // 推进游标。n ≤ pixel_count，所以最多跨过一次轮边界。
+        // Advance the cursor. n ≤ pixel_count, so it crosses a sweep boundary at most once.
         this.cursor += n;
         if (this.cursor >= this.pixelCount) {
             this.cursor -= this.pixelCount;
@@ -328,27 +386,31 @@ class PathTracePassImpl implements PathTracePass {
     }
 
     /**
-     * 清空累加缓冲并从头开始（游标归零）。
-     * 相机/场景/背景/渲染参数变化时必须调用，否则新旧画面混叠。
+     * Clears the accumulation buffer and restarts from the beginning (cursor reset).
+     * Must be called when the camera/scene/background/render parameters change,
+     * otherwise old and new images blend together.
      */
     private requestReset(): void {
         this.resetPending = true;
-        // frameIndex 故意不归零：它是 LDS 的采样序号，只喂随机数、不参与累加。
-        // 拖动时每帧都重置，若序号回到 1，所有像素会一直用同一组随机数 ——
-        // 单样本画面会呈现一张固定的屏幕空间花纹，而不像噪点。
+        // frameIndex deliberately does not reset: it is the LDS sample index, feeding
+        // only random numbers and not the running average. During dragging every frame
+        // resets; if the index went back to 1, all pixels would keep using the same
+        // random set — a single-sample image would show a fixed screen-space pattern
+        // instead of noise.
     }
 
-    /** 设备级资源：只有换 GPUDevice 时才需要重建。 */
+    /** Device-level resources: only need rebuilding when the GPUDevice changes. */
     private rebuildDeviceResources(): void {
         const d = this.context.device;
 
         this.uniformBuf?.destroy();
         this.uniformBuf = d.createBuffer({
-            size: 48, // Uniforms: 8 × u32、1 × f32 和对齐填充，见 structs.wgsl
+            size: 48, // Uniforms: 8 × u32, 1 × f32 and alignment padding; see structs.wgsl
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
 
-        // storage buffer：2=nodes, 3=像素顺序, 4..7=几何/三角形/材质/实例, 16=环境 CDF。
+        // Storage buffers: 2=nodes, 3=pixel order, 4..7=geometry/triangles/
+        // materials/instances, 16=environment CDF.
         this.bgl = d.createBindGroupLayout({
             entries: [
                 { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
@@ -406,20 +468,23 @@ class PathTracePassImpl implements PathTracePass {
         this.pipeline = d.createComputePipeline({ layout, compute: { module, entryPoint: 'main' } });
     }
 
-    /** 尺寸级资源：只有渲染分辨率变化时才需要重建。 */
+    /** Size-dependent resources: only need rebuilding when the render resolution changes. */
     private rebuildAccumTextures(): void {
         const d = this.context.device;
         if (!this.width || !this.height) return;
 
         for (const t of this.accumTextures) t?.destroy();
         for (let i = 0; i < 2; i++) {
-            // 累加器必须是 fp32。fp16 的 ulp 在数值 0.3 附近约 2.4e-4，而第 N 个
-            // 样本对均值的贡献是 (radiance - mean)/N —— N 上千以后就落在一个 ulp
-            // 以内，更新被四舍五入吞掉。对重尾分布（火萤）尤其致命：均值卡在早期
-            // 样本附近不再收敛，画面会随样本数增加而持续变暗。
+            // The accumulator must be fp32. fp16 has an ulp of about 2.4e-4 near 0.3,
+            // while the Nth sample's contribution to the mean is (radiance - mean)/N —
+            // past a few thousand samples it falls within one ulp and the update is
+            // swallowed by rounding. This is especially fatal for heavy-tailed
+            // distributions (fireflies): the mean sticks near the early samples and
+            // stops converging, and the image keeps darkening as samples accumulate.
             //
-            // COPY_*：每帧把读纹理拷到写纹理（部分采样只写抽中的像素）。
-            // RENDER_ATTACHMENT：重置时用 clear 把两张一起清黑。
+            // COPY_*: copy the read texture to the write texture each frame (partial
+            // sampling only writes the selected pixels).
+            // RENDER_ATTACHMENT: clear both to black on reset.
             this.accumTextures[i] = d.createTexture({
                 size: { width: this.width, height: this.height },
                 format: 'rgba32float',
@@ -434,7 +499,7 @@ class PathTracePassImpl implements PathTracePass {
             this.accumViews[i] = this.accumTextures[i]!.createView();
         }
 
-        // 像素采样顺序表：每轮每个像素恰好出现一次。
+        // Pixel sampling order table: each pixel appears exactly once per sweep.
         this.pixelCount = this.width * this.height;
         this.orderBuf?.destroy();
         const order = buildPixelOrder(this.pixelCount);
@@ -453,7 +518,10 @@ class PathTracePassImpl implements PathTracePass {
         this.version++;
     }
 
-    /** 两张 ping-pong 的 bind group 一起建，保证 0/1 槽位引用的是同一批场景资源。 */
+/**
+ * Builds both ping-pong bind groups together so slots 0/1 reference the same batch
+ * of scene resources.
+ */
     private rebuildBindGroups(): void {
         this.bindGroups[0] = this.createBindGroup(this.accumViews[0]!, this.accumViews[1]!);
         this.bindGroups[1] = this.createBindGroup(this.accumViews[1]!, this.accumViews[0]!);
@@ -463,7 +531,10 @@ class PathTracePassImpl implements PathTracePass {
         this.bindGroupModelVersion = this.model.version();
     }
 
-    /** 每次重建只有两张 ping-pong 视图在变，场景资源全部从持有的引用里取。 */
+/**
+ * On each rebuild only the two ping-pong views change; all scene resources come
+ * from held references.
+ */
     private createBindGroup(writeView: GPUTextureView, readView: GPUTextureView): GPUBindGroup {
         const model = this.model;
         const bg = this.background;
@@ -494,5 +565,5 @@ class PathTracePassImpl implements PathTracePass {
     }
 }
 
-/** 契约层类绑定的赋值。 */
+/** Assignment of the contract-layer class binding. */
 PathTracePass = PathTracePassImpl;

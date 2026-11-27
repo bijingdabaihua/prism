@@ -1,21 +1,21 @@
 import type { Prism } from '../core/api/prism';
 import { requestEmissionCommand } from '../agent/emission-command';
 
-/** 当前发光场景的文字指令面板。 */
+/** Text command panel for the current emissive scene. */
 export let createWorkbench: (prism: Prism, signal: AbortSignal) => HTMLElement;
 
-// ═══════════════════════ 实现层（不导出） ═══════════════════════
+// ═════════ Implementation layer (not exported) ══════════
 
 createWorkbench = (prism, signal) => {
     const panel = document.createElement('details');
     panel.className = 'workbench';
     panel.innerHTML = `
-        <summary>AI 调场景</summary>
+        <summary>AI scene control</summary>
         <form class="workbench-panel">
-            <label>场景指令
-                <input type="text" maxlength="500" required placeholder="例如：把面板调暗一点">
+            <label>Scene command
+                <input type="text" maxlength="500" required placeholder="e.g. dim the panel">
             </label>
-            <button type="submit">执行</button>
+            <button type="submit">Run</button>
             <p role="status"></p>
         </form>
     `;
@@ -29,18 +29,18 @@ createWorkbench = (prism, signal) => {
         const prompt = input.value.trim();
         if (!prompt || button.disabled) return;
         button.disabled = true;
-        status.textContent = '正在理解指令…';
+        status.textContent = 'Understanding the command…';
         try {
             const next = await requestEmissionCommand(prompt, current, signal);
             if (signal.aborted) return;
             if (next === null) {
-                status.textContent = '当前场景可以调整发光面板的亮度，请试试「把灯调暗一点」。';
+                status.textContent = 'This scene can adjust the brightness of the emissive panel. Try "dim the light a little."';
                 return;
             }
             await prism.model.setEmissionScale(next);
             if (signal.aborted) return;
             current = next;
-            status.textContent = `发光亮度已设为 ${Math.round(next * 100)}%。`;
+            status.textContent = `Emission brightness set to ${Math.round(next * 100)}%.`;
         } catch (err) {
             if (!signal.aborted) status.textContent = err instanceof Error ? err.message : String(err);
         } finally {

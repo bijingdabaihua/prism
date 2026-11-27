@@ -1,15 +1,16 @@
 import type { SceneCard } from './catalog';
 
 /**
- * 降级页：浏览器没有 WebGPU 时替代渲染页。
+ * Fallback page: stands in for the render page when the browser lacks WebGPU.
  *
- * 落地页要回答三个问题，别的都不重要：这里本来是什么、为什么现在看不到、
- * 怎么才能看到。所以给一张同源渲出来的图，一行原因，一张支持矩阵。
+ * A landing page must answer three questions and nothing else matters: what was
+ * here, why it cannot be seen now, and how to see it. So it shows an image
+ * rendered from the same source, a one-line reason, and a support matrix.
  */
 const BROWSERS: ReadonlyArray<readonly [string, string]> = [
-    ['Chrome / Edge', '113 及以上，默认开启'],
-    ['Safari', '18 及以上'],
-    ['Firefox', '需要在 about:config 打开 dom.webgpu.enabled'],
+    ['Chrome / Edge', '113 and later, enabled by default'],
+    ['Safari', '18 and later'],
+    ['Firefox', 'Enable dom.webgpu.enabled in about:config'],
 ];
 
 export class UnsupportedView {
@@ -27,17 +28,17 @@ export class UnsupportedView {
         const back = document.createElement('a');
         back.className = 'unsupported-back';
         back.href = '#/';
-        back.textContent = '← 全部场景';
+        back.textContent = '← All scenes';
         root.appendChild(back);
 
         const head = document.createElement('header');
         head.className = 'unsupported-head';
         const title = document.createElement('h1');
-        title.textContent = '这个浏览器还跑不了 WebGPU';
+        title.textContent = 'This browser cannot run WebGPU yet';
         head.appendChild(title);
         const lede = document.createElement('p');
         lede.textContent =
-            'Prism 的每一帧都是在显卡上现算的，本站没有预渲染的版本。下面是同一套代码在支持的浏览器里渲出来的样子。';
+            'Prism computes every frame live on the GPU, and this site has no pre-rendered version. The image below shows what the same code produces in a supported browser.';
         head.appendChild(lede);
         root.appendChild(head);
 
@@ -71,7 +72,7 @@ export class UnsupportedView {
         const note = document.createElement('p');
         note.className = 'unsupported-note';
         note.textContent =
-            '如果用的已经是新版 Chrome，打开 chrome://gpu 搜 WebGPU，确认状态是 Enabled —— 被企业策略或实验开关关掉时，浏览器版本再新也跑不起来。';
+            'If you are already on a recent Chrome, open chrome://gpu and search for WebGPU to confirm its status is Enabled — a browser version alone is not enough when an enterprise policy or experimental flag has turned it off.';
         root.appendChild(note);
 
         container.appendChild(root);

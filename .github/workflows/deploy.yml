@@ -1,5 +1,5 @@
-# 推送到 main 自动构建并部署到 GitHub Pages。
-# 首次启用：仓库 Settings → Pages → Source 选 "GitHub Actions"。
+# Build and deploy to GitHub Pages automatically on pushes to main.
+# First-time setup: in repository Settings → Pages → Source, choose "GitHub Actions".
 name: Deploy to GitHub Pages
 
 on:
@@ -12,7 +12,7 @@ permissions:
   pages: write
   id-token: write
 
-# 同一时间只跑一个部署，避免互相覆盖
+# Run only one deployment at a time so they don't overwrite each other
 concurrency:
   group: pages
   cancel-in-progress: true
@@ -30,9 +30,9 @@ jobs:
 
       - run: npm ci
 
-      # 构建产物在 dist/app（vite outDir 是 ../../dist/app）。
-      # GITHUB_ACTIONS=true 时 vite.config.ts 会把 base 设成 /prism/，
-      # 所以项目页路径下的 JS / Worker / 静态资源都能正确解析。
+      # Build output is in dist/app (vite outDir is ../../dist/app).
+      # With GITHUB_ACTIONS=true, vite.config.ts sets base to /prism/, so JS / Worker /
+      # static assets resolve correctly under the project page path.
       - run: npm run build
         env:
           VITE_PUBLIC_DEEPSEEK_API_KEY: ${{ vars.VITE_PUBLIC_DEEPSEEK_API_KEY }}

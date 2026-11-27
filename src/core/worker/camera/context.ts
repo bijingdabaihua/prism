@@ -1,71 +1,85 @@
 /**
- * GPU 基础设施：申请设备（createDevice）并把 GPUDevice 和 OffscreenCanvas 绑定为一个整体。
- * RenderContext 是渲染目标尺寸的单一持有者。
+ * GPU infrastructure: requests the device (createDevice) and binds GPUDevice and
+ * OffscreenCanvas into one unit. RenderContext is the single owner of the render
+ * target size.
  *
- * 画布宿主只有 OffscreenCanvas 一种 —— 整条渲染管线只活在 Worker 中。离屏画布读不到
- * CSS 布局（没有 clientWidth / devicePixelRatio），尺寸只能由主线程通过 camera.resize
- * 送进来。
+ * OffscreenCanvas is the only canvas host — the whole render pipeline lives in the
+ * Worker. An offscreen canvas cannot read CSS layout (no clientWidth /
+ * devicePixelRatio), so the size can only be sent in by the main thread through
+ * camera.resize.
  *
- * Canvas 的宽高是共享基础设施，不属于任何单个 pass；尺寸变化通过 onResize 订阅通知
- * 各组件（Camera / PathTracePass 等），各自响应。尺寸的唯一来源是 setSize() ——
- * Worker 收到的 resize 命令 —— 应用即通知，没有逐帧探测。
+ * Canvas width and height are shared infrastructure, not owned by any single pass;
+ * size changes are delivered to components (Camera / PathTracePass, etc.) through
+ * the onResize subscription, and each responds on its own. The only source of size
+ * is setSize() — the resize command received by the Worker — applied and announced
+ * immediately, with no per-frame polling.
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * The file has two layers: contract (all exports) and implementation (no exports);
+ * see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ═════════════════ Contract layer (exports) ══════════════════
 
 /**
- * RenderContext 的类绑定：把 device 和 canvas 绑成一个渲染目标。
+ * RenderContext class binding: binds device and canvas into one render target.
  *
- * 此处只有声明，赋值在实现层。
+ * This is only a declaration; the assignment is in the implementation layer.
  */
 export let RenderContext: {
     new (device: GPUDevice, canvas: OffscreenCanvas): RenderContext;
 };
 
 /**
- * 渲染目标：GPUDevice + canvas 的整体，渲染目标尺寸的单一持有者。
+ * Render target: GPUDevice + canvas as a unit, and the single owner of the render
+ * target size.
  *
- * Canvas 的宽高是共享基础设施，不属于任何单个 pass；尺寸变化通过 onResize 订阅通知
- * 各组件（Camera / PathTracePass 等），各自响应。
+ * Canvas width and height are shared infrastructure, not owned by any single pass;
+ * size changes are delivered to components (Camera / PathTracePass, etc.) through
+ * the onResize subscription, and each responds on its own.
  */
 export interface RenderContext {
     readonly device: GPUDevice;
-    /** 平台首选 canvas 格式，device 无关，构造时即可确定。 */
+    /** Platform-preferred canvas format; device-independent and known at construction. */
     readonly format: GPUTextureFormat;
 
     gpuContext(): GPUCanvasContext | null;
     canvas(): OffscreenCanvas;
-    /** 尺寸来源是外部（resize 命令）：直接应用并通知订阅者。 */
+    /** Size comes from outside (the resize command): apply it and notify subscribers. */
     setSize(width: number, height: number): void;
     width(): number;
     height(): number;
-    /** 注册尺寸变化回调。回调在 setSize() 内同步触发。 */
+    /** Registers a size-change callback. Callbacks fire synchronously inside setSize(). */
     onResize(fn: (width: number, height: number) => void): void;
 }
 
 /**
- * WebGPUUnavailableError 的类绑定：拿不到 WebGPU 设备 / adapter 时抛出。
+ * WebGPUUnavailableError class binding: thrown when no WebGPU device / adapter is
+ * available.
  *
- * 调用方据此走降级页，而不是当成普通错误。
+ * Callers use this to route to the fallback page instead of treating it as an
+ * ordinary error.
  */
 export let WebGPUUnavailableError: {
     new (message: string): WebGPUUnavailableError;
 };
 
-/** 拿不到 WebGPU 设备 —— 调用方据此走降级页，而不是当成普通错误。 */
+/**
+ * No WebGPU device — callers use this to route to the fallback page instead of
+ * treating it as an ordinary error.
+ */
 export interface WebGPUUnavailableError extends Error {}
 
 /**
- * 申请 adapter + device。主线程和 Worker 走同一条 —— 设备的申请条件只写一遍。
+ * Requests an adapter + device. The main thread and the Worker share one path —
+ * the device requirements are written once.
  *
- * 浏览器没有 WebGPU、或者拿不到 adapter（驱动进黑名单、虚拟机、关了硬件加速），
- * 都抛 WebGPUUnavailableError；requestDevice 自身的失败原样上抛。
+ * A browser without WebGPU, or one that cannot get an adapter (driver blocklisted,
+ * virtual machine, hardware acceleration disabled), throws WebGPUUnavailableError;
+ * failures from requestDevice itself propagate unchanged.
  */
 export let createDevice: () => Promise<GPUDevice>;
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ════════════ Implementation layer (not exported) ═════════════
 
 class RenderContextImpl implements RenderContext {
     public readonly device: GPUDevice;
@@ -123,7 +137,7 @@ class WebGPUUnavailableErrorImpl extends Error implements WebGPUUnavailableError
     }
 }
 
-/** requestAdapter 在某些机器上会一直不 resolve，别让调用方无限等待。 */
+/** requestAdapter never resolves on some machines; do not let callers wait forever. */
 const ADAPTER_TIMEOUT_MS = 8000;
 
 function raceTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
@@ -147,8 +161,8 @@ createDevice = async () => {
         throw new WebGPUUnavailableErrorImpl('WebGPU not supported. Try Chrome 113+.');
     }
 
-    // 双显卡笔记本上 dGPU 休眠时 'high-performance' 档可能拿不到 adapter，
-    // 超时或 null 都退回默认档再试一次。
+    // On dual-GPU laptops the 'high-performance' tier may fail to get an adapter
+    // while the dGPU is asleep; on timeout or null, retry once with the default tier.
     const adapter =
         (await raceTimeout(
             navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }),
@@ -156,19 +170,20 @@ createDevice = async () => {
         )) ?? (await raceTimeout(navigator.gpu.requestAdapter(), ADAPTER_TIMEOUT_MS));
     if (!adapter) {
         throw new WebGPUUnavailableErrorImpl(
-            'No WebGPU adapter. 打开 chrome://gpu 确认 WebGPU 为 Enabled，' +
-                '并检查系统设置里「使用图形加速」是否开启。',
+            'No WebGPU adapter. Open chrome://gpu to confirm WebGPU is Enabled, ' +
+                'and check that "Use graphics acceleration" is on in system settings.',
         );
     }
 
-    // 时间戳用于测量每帧 GPU 采样耗时（采样预算控制器的输入）。
-    // 拿不到就退回 onSubmittedWorkDone，不影响渲染。
+    // Timestamps measure per-frame GPU sampling time (the sampling-budget
+    // controller's input). If unavailable, fall back to onSubmittedWorkDone;
+    // rendering is unaffected.
     const requiredFeatures: GPUFeatureName[] = [];
     if (adapter.features.has('timestamp-query')) requiredFeatures.push('timestamp-query');
 
     return adapter.requestDevice({ requiredFeatures });
 };
 
-/** 契约层类绑定与函数的赋值。 */
+/** Assigns the contract-layer class bindings and function. */
 RenderContext = RenderContextImpl;
 WebGPUUnavailableError = WebGPUUnavailableErrorImpl;

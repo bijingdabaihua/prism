@@ -2,8 +2,8 @@ import type { Vec3 } from './types';
 import { normalize, cross, sub, dot } from './vec3';
 
 /**
- * 4×4 矩阵，列主序（Float32Array），元素按 m[col * 4 + row] 访问 ——
- * 与 WGSL 的默认矩阵布局一致。
+ * 4×4 matrix in column-major order (Float32Array), elements accessed as m[col * 4 + row] —
+ * matching WGSL's default matrix layout.
  */
 export class Mat4 {
     public static from(data: Float32Array): Mat4 {
@@ -123,7 +123,8 @@ export class Mat4 {
         const b11 = a22 * a33 - a23 * a32;
 
         const det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
-        // 奇异矩阵没有逆：退回单位阵，调用方拿到的画面是错的，但不至于整帧丢失
+        // A singular matrix has no inverse: fall back to identity. The caller gets a wrong
+        // image, but does not lose the whole frame.
         if (Math.abs(det) < 1e-12) return Mat4.identity();
 
         const invDet = 1 / det;

@@ -5,50 +5,65 @@ import { TextureSet } from './texture-set';
 import { packPBRMaterial, PBR_MAT_FLOATS } from './packing';
 
 /**
- * GPU 材质存储 —— 持有材质 SSBO。
+ * GPU material store — holds the material SSBO.
  *
- * 一节材质 = PBR_MAT_FLOATS 个 float，shader 用三角形里存的绝对槽位索引它。
- * 同一个材质对象只打包一次，被多个 mesh 引用时共用同一个槽位。
+ * One material record = PBR_MAT_FLOATS floats; the shader indexes it by the absolute slot
+ * stored in triangles. The same material object is packed once and shares one slot when
+ * referenced by several meshes.
  *
- * 材质表同时也持有所属的 TextureSet：材质表里的 TexRef 就是图集的层号，
- * 两者是一份数据的两半，分开持有只会多一个构造函数参数。
+ * The material table also owns its TextureSet: a TexRef in the table is an atlas layer
+ * number, and the two are halves of one piece of data; holding them apart would just add
+ * a constructor argument.
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * The file has two layers: contract (all exports) and implementation (no exports);
+ * see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ══════════════════ Contract layer (exports) ═════════════════
 
 /**
- * MaterialStore 的类绑定：构造即建空的 TextureSet。
+ * Class binding for MaterialStore: construction creates an empty TextureSet.
  *
- * register() 可以随场景追加反复调用；compile() 按当前已注册的材质重建 SSBO，
- * 返回上一块 SSBO —— 交给 Model 在 GPU 用完后再释放。
+ * register() may be called repeatedly as scenes are appended; compile() rebuilds the SSBO
+ * from the currently registered materials and returns the previous SSBO — Model releases it
+ * after the GPU is done with it.
  *
- * 此处只有声明，赋值在实现层。
+ * Only declarations here; assignment is in the implementation layer.
  */
 export let MaterialStore: {
     new (device: GPUDevice): MaterialStore;
 };
 
-/** GPU 材质存储：材质 SSBO + 所属贴图集，按材质对象去重槽位。 */
+/**
+ * GPU material store: the material SSBO plus its texture atlas, with slots deduplicated by
+ * material object.
+ */
 export interface MaterialStore {
-    /** 材质采样的图集；PathTracePass 直接从这里拿四个数组的 view。 */
+    /**
+     * Atlas for material sampling; PathTracePass takes views of the four arrays directly
+     * from here.
+     */
     readonly textures: TextureSet;
 
-    /** 返回该材质在材质表里的绝对槽位；重复注册同一个对象返回同一槽位。 */
+    /**
+     * Returns the material's absolute slot in the material table; registering the same
+     * object again returns the same slot.
+     */
     register(material: PBRMaterial): number;
     /**
-     * 把所有已注册的材质写进一块新 SSBO，返回上一块（首次编译时为 null）。
+     * Writes all registered materials into a new SSBO and returns the previous one (null on
+     * first compile).
      *
-     * 材质表只增不减，所以追加场景时整块重建最简单。旧 buffer 可能还被
-     * 已提交的 bind group 引用，调用方要在 GPU 完成后才能 destroy。
+     * The material table only grows, so rebuilding the whole block when a scene is appended
+     * is the simplest approach. The old buffer may still be referenced by submitted bind
+     * groups; the caller must wait for the GPU before destroying it.
      */
     compile(): GPUBuffer | null;
     buffer(): GPUBuffer;
     destroy(): void;
 }
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ═════════════ Implementation layer (not exported) ════════════
 
 class MaterialStoreImpl implements MaterialStore {
     public readonly textures: TextureSet;
@@ -74,7 +89,7 @@ class MaterialStoreImpl implements MaterialStore {
 
     public compile(): GPUBuffer | null {
         if (this.materials.length === 0) {
-            throw new Error('MaterialStore: 场景里没有任何材质');
+            throw new Error('MaterialStore: the scene has no materials');
         }
         const data = new Float32Array(this.materials.length * PBR_MAT_FLOATS);
         for (let i = 0; i < this.materials.length; i++) {
@@ -101,10 +116,11 @@ class MaterialStoreImpl implements MaterialStore {
     }
 
     /**
-     * 材质里的贴图 → texture_2d_array 的层号。
+     * Material textures → texture_2d_array layer numbers.
      *
-     * IR 里的贴图已经是解码好的 Image，这里不需要再查表 —— 解码和去重都在
-     * 导入器那一侧（image.ts 的 loadTexture）完成，编译层只负责分配层号。
+     * Textures in the IR are already decoded Images, so no lookup is needed here — decoding
+     * and deduplication happen on the importer side (loadTexture in image.ts); the compiler
+     * layer only allocates layer numbers.
      */
     private resolveTextures(material: PBRMaterial): MaterialTexSlots {
         return {
@@ -112,18 +128,22 @@ class MaterialStoreImpl implements MaterialStore {
             roughness: this.texRef(material.roughnessTexture, 'roughness'),
             normal: this.texRef(material.normalTexture, 'normal'),
             occlusion: this.texRef(material.occlusionTexture, 'occlusion'),
-            // 打包图是数据图（G = rough, B = metal），和单通道粗糙度共用同一个数组：
-            // 两者都是 rgba8unorm，通道各自独立，没有必要为它多开一个绑定。
+            // The packed map is a data map (G = rough, B = metal) and shares an array with
+            // single-channel roughness: both are rgba8unorm with independent channels, so
+            // there is no need for another binding.
             metallicRoughness: this.texRef(material.metallicRoughnessTexture, 'roughness'),
         };
     }
 
-    /** 每米重复几次，由贴图自己的一格几米换算 —— 几何 UV 以米为单位。 */
+    /**
+     * Repeats per meter, converted from the texture's own meters per tile — geometry UVs
+     * are in meters.
+     */
     private texRef(image: Image | undefined, kind: TextureKind): TexRef | undefined {
         if (!image) return undefined;
         return { layer: this.textures.register(kind, image), scale: 1 / (image.meters ?? 1), has: 1 };
     }
 }
 
-/** 契约层类绑定的赋值。 */
+/** Assignment of the contract-layer class binding. */
 MaterialStore = MaterialStoreImpl;

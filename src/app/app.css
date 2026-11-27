@@ -92,7 +92,7 @@ canvas:active {
   }
 }
 
-/* 画廊 */
+/* Gallery */
 
 .gallery {
   height: 100%;
@@ -238,7 +238,7 @@ canvas:active {
   letter-spacing: 0.03em;
 }
 
-/* 降级页 */
+/* Fallback page */
 
 .unsupported {
   height: 100%;
@@ -312,7 +312,7 @@ canvas:active {
   color: rgba(255, 255, 255, 0.3);
 }
 
-/* 渲染页 */
+/* Render page */
 
 .stage {
   position: relative;

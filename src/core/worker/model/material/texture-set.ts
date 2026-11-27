@@ -3,40 +3,52 @@ import type { TextureKind } from './material';
 import { linearToSRGB } from '../../../math/color';
 
 /**
- * 材质贴图 —— 四个 texture_2d_array（颜色 / 法线 / 粗糙度 / AO），各自带完整 mip 链。
+ * Material textures — four texture_2d_arrays (color / normal / roughness / AO), each with a
+ * full mip chain.
  *
- * 为什么不用图集：图集里一张 1024 的贴图只占 1/4 页，几套材质就把 2048 页塞满，
- * 而且整页共用一个 mip 链，小图和大图只能取同一个 LOD。分数组之后每张贴图
- * 独立分层，层号进材质表，shader 用 textureSampleLevel 显式选 LOD。
+ * Why not an atlas: in an atlas a 1024 texture occupies only a quarter page, a few material
+ * sets fill up the 2048 page, and the whole page shares one mip chain, so small and large
+ * textures can only use the same LOD. With separate arrays each texture gets its own layer,
+ * the layer number goes into the material table, and the shader picks the LOD explicitly with
+ * textureSampleLevel.
  *
- * 为什么用数组不用多张纹理：每 stage 的采样纹理数有上限（默认 16），
- * 一套材质四张图，几个材质就会超。四个数组把绑定数固定成 4。
+ * Why arrays instead of multiple textures: the number of sampled textures per stage is
+ * limited (16 by default), and one material set has four maps, so a few materials overflow it.
+ * Four arrays pin the binding count at 4.
  *
- * 生命周期跟着 MaterialStore（按 key 缓存），换场景时不清空：贴图是资产，不是场景数据。
- * 四个数组按需分配 —— 一张贴图都没注册时不占显存，只留 1×1 占位。
- * 0 号层永远保留给占位数据，真正的贴图从 1 号层开始。
+ * Lifetime follows MaterialStore (cached by key) and is not cleared when the scene changes:
+ * textures are assets, not scene data.
+ * The four arrays are allocated on demand — with no texture registered they consume no VRAM,
+ * only a 1×1 placeholder. Layer 0 is always reserved for placeholder data, and real textures
+ * start at layer 1.
  *
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * The file has two layers: contract (all exports) and implementation (no exports);
+ * see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ══════════════════ Contract layer (exports) ═════════════════
 
 /**
- * TextureSet 的类绑定：构造即建四个 1×1 占位数组和公共采样器，整块数组首次
- * 注册时才分配。
+ * Class binding for TextureSet: construction creates four 1×1 placeholder arrays and a
+ * shared sampler; the full arrays are allocated on first registration.
  *
- * 此处只有声明，赋值在实现层。
+ * Only declarations here; assignment is in the implementation layer.
  */
 export let TextureSet: {
     new (device: GPUDevice, size?: number, layerCount?: number): TextureSet;
 };
 
-/** 材质贴图集：四个 texture_2d_array，按 Image 对象身份去重层号。 */
+/**
+ * Material texture set: four texture_2d_arrays, deduplicating layer numbers by Image
+ * object identity.
+ */
 export interface TextureSet {
     /**
-     * 把一张贴图写进对应数组的一层，返回层号。同一张 Image（按对象身份）只占一层。
+     * Writes a texture into a layer of the corresponding array and returns the layer number.
+     * The same Image (by object identity) occupies only one layer.
      *
-     * 贴图尺寸必须等于数组尺寸：数组内各层共享 mip 链，尺寸不一致没法放进来。
+     * Texture size must equal the array size: layers in an array share a mip chain, so
+     * mismatched sizes cannot be stored.
      */
     register(kind: TextureKind, image: Image): number;
     albedoView(): GPUTextureView;
@@ -47,9 +59,12 @@ export interface TextureSet {
     destroy(): void;
 }
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ═════════════ Implementation layer (not exported) ════════════
 
-/** 颜色贴图存 sRGB（8 位精度保留在暗部），数据贴图存原始值。 */
+/**
+ * Color maps are stored as sRGB (8-bit precision preserves shadows), data maps store raw
+ * values.
+ */
 const FORMAT: Record<TextureKind, GPUTextureFormat> = {
     albedo: 'rgba8unorm-srgb',
     normal: 'rgba8unorm',
@@ -64,7 +79,7 @@ const ENCODE_SRGB: Record<TextureKind, boolean> = {
     occlusion: false,
 };
 
-/** 0 号层的占位颜色：白色、平面法线、全粗糙、无遮挡。 */
+/** Placeholder color for layer 0: white, flat normal, fully rough, no occlusion. */
 const PLACEHOLDER: Record<TextureKind, [number, number, number]> = {
     albedo: [1, 1, 1],
     normal: [0.5, 0.5, 1],
@@ -75,10 +90,10 @@ const PLACEHOLDER: Record<TextureKind, [number, number, number]> = {
 interface Channel {
     texture: GPUTexture;
     view: GPUTextureView;
-    /** 下一个可用层号；0 号层是占位。 */
+    /** Next free layer number; layer 0 is the placeholder. */
     next: number;
     allocated: boolean;
-    /** 已注册的贴图 → 层号；按 Image 对象身份去重。 */
+    /** Registered texture → layer number; deduplicated by Image object identity. */
     keys: Map<Image, number>;
 }
 
@@ -109,7 +124,8 @@ class TextureSetImpl implements TextureSet {
     }
 
     public register(kind: TextureKind, image: Image): number {
-        // 尺寸先校验：ensureChannel 会分配整块数组，尺寸不对时不该先占显存
+        // Validate size first: ensureChannel allocates the full array, which should not claim
+        // VRAM before the size is known to be right
         if (image.width !== this.size || image.height !== this.size) {
             throw new Error(
                 `TextureSet: ${kind} texture is ${image.width}×${image.height}, ` +
@@ -158,10 +174,11 @@ class TextureSetImpl implements TextureSet {
     }
 
     /**
-     * 首次真正注册时才分配整块数组（1024² × 16 层 × mip 约 84 MB，四个通道合计 ~335 MB）。
+     * Allocates the full array on first real registration (1024² × 16 layers × mips is about
+     * 84 MB; four channels total ~335 MB).
      *
-     * 给到 16 是因为「地面一套材质 + 摆几个 glTF 模型」这种组合场景里，
-     * 每个模型自带漫反射/法线/粗糙度三张图，8 层只够放两个模型。
+     * 16 layers because in a combined scene like "one ground material + a few glTF models",
+     * each model brings its own diffuse/normal/roughness maps, and 8 layers only fit two models.
      */
     private ensureChannel(kind: TextureKind): Channel {
         const channel = this.channels[kind];
@@ -200,7 +217,10 @@ class TextureSetImpl implements TextureSet {
         return { texture, view, next: 1, allocated: false, keys: new Map() };
     }
 
-    /** 逐级降采样并上传：每一级的数据都从上一级算，保证 mip 之间连续。 */
+    /**
+     * Downsamples level by level and uploads: each level is computed from the previous one,
+     * keeping mips continuous.
+     */
     private uploadMips(channel: Channel, layer: number, image: Image, srgb: boolean): void {
         let width = image.width;
         let height = image.height;
@@ -226,7 +246,8 @@ class TextureSetImpl implements TextureSet {
         srgb: boolean,
     ): void {
         const rowBytes = width * 4;
-        // writeTexture 的 bytesPerRow 必须是 256 的倍数，小 mip 需要补行尾。
+        // writeTexture requires bytesPerRow to be a multiple of 256; small mips need
+        // row-end padding.
         const bytesPerRow = Math.ceil(rowBytes / 256) * 256;
         const source = encodeRGBA8(linear, width * height, srgb);
         let bytes = source;
@@ -245,10 +266,10 @@ class TextureSetImpl implements TextureSet {
     }
 }
 
-/** 契约层类绑定的赋值。 */
+/** Assignment of the contract-layer class binding. */
 TextureSet = TextureSetImpl;
 
-/** 线性 RGB float → 8 位 RGBA。颜色贴图编码回 sRGB 交给硬件解码。 */
+/** Linear RGB float → 8-bit RGBA. Color maps are encoded back to sRGB for hardware decoding. */
 function encodeRGBA8(linear: Float32Array, pixels: number, srgb: boolean): Uint8Array {
     const out = new Uint8Array(pixels * 4);
     for (let i = 0; i < pixels; i++) {
@@ -262,7 +283,7 @@ function encodeRGBA8(linear: Float32Array, pixels: number, srgb: boolean): Uint8
     return out;
 }
 
-/** 2×2 盒式降采样，边缘夹取。输入/输出都是线性 RGB float。 */
+/** 2×2 box downsample with edge clamping. Input/output are linear RGB float. */
 function downsample(src: Float32Array, sw: number, sh: number, dw: number, dh: number): Float32Array {
     const dst = new Float32Array(dw * dh * 3);
     for (let y = 0; y < dh; y++) {

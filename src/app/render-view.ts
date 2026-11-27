@@ -4,19 +4,23 @@ import { loadScene } from './assemble';
 import { OrbitControls } from './orbit-controls';
 import { createWorkbench } from './workbench';
 
-/** 场景编译完之后，再给 Worker 这么久把画面铺满，然后撤 loading。 */
+/** After the scene compiles, give the Worker this long to fill the frame before
+ *  hiding the loading overlay. */
 const LOADING_HOLD_MS = 1500;
-/** 请求的画面推送间隔：约 60 Hz，实际受渲染帧率限制。 */
+/** Requested frame push interval: about 60 Hz, in practice bounded by the render frame rate. */
 const FRAME_INTERVAL_MS = 1000 / 60;
 
 /**
- * 渲染页外壳：画布、加载状态和生命周期。
+ * Render page shell: canvas, loading state and lifecycle.
  *
- * 场景怎么装交给 `loadScene`，指针怎么转交给 `OrbitControls`；这里只把
- * 页面元素拼起来，再守住 disposed —— 初始化期间被切走时要还回 Worker。
+ * Scene assembly is left to `loadScene` and pointer interaction to
+ * `OrbitControls`; this file only pieces the page together and guards
+ * `disposed` — a worker built during initialization must be returned if the
+ * user navigates away.
  *
- * 这里只认识 `Prism` —— 画面是 Worker 推回来的 ImageBitmap，主线程用
- * bitmaprenderer 直接贴上，不碰任何 GPU 资源。
+ * It only knows `Prism` — frames arrive as ImageBitmaps pushed by the Worker
+ * and the main thread paints them through bitmaprenderer without touching any
+ * GPU resource.
  */
 export class RenderView {
     private prism: Prism | null = null;
@@ -30,7 +34,8 @@ export class RenderView {
     private readonly workbenchAbort = new AbortController();
     private readonly controls = new OrbitControls();
     private readonly key: string;
-    /** 有 WebGPU API、但拿不到设备时交给外层换成降级页。 */
+    /** Invoked when the WebGPU API exists but no device is available; the caller
+     *  swaps in the fallback page. */
     private readonly onUnsupported: () => void;
 
     constructor(key: string, onUnsupported: () => void) {
@@ -52,31 +57,32 @@ export class RenderView {
             const canvas = document.createElement('canvas');
             this.canvas = canvas;
             const context = canvas.getContext('bitmaprenderer');
-            if (!context) throw new Error('浏览器不支持 bitmaprenderer canvas');
+            if (!context) throw new Error('This browser does not support bitmaprenderer canvas');
             this.context = context;
             stage.insertBefore(canvas, loading);
 
             this.updateLoading('Initializing GPU...');
             const prism = await Prism.create();
             this.prism = prism;
-            // 初始化期间被切走（连点两下卡片）—— 把刚建好的 Worker 还回去
+            // Navigated away during initialization (double-clicked a card) — return the
+            // Worker just created
             if (this.disposed) {
                 prism.dispose();
                 return;
             }
 
-            // Worker 里的画布尺寸只能由主线程量好送进去
+            // The Worker cannot measure the canvas, so the main thread measures and sends the size
             this.watchSize();
 
-            // 返回画廊的入口。浏览器后退也行，但访客不会去按。
+            // Entry back to the gallery. Browser Back works too, but visitors will not use it.
             const back = document.createElement('a');
             back.className = 'stage-back';
             back.href = '#/';
-            back.textContent = '← 全部场景';
+            back.textContent = '← All scenes';
             stage.appendChild(back);
 
             const card = SCENE_CARDS[this.key];
-            if (!card) throw new Error(`没有场景 "${this.key}"`);
+            if (!card) throw new Error(`No scene named "${this.key}"`);
 
             this.updateLoading('Loading scene...');
             await loadScene(prism, card);
@@ -85,7 +91,8 @@ export class RenderView {
                 return;
             }
 
-            // 画面从这一条流里来：Worker 每帧推一张 ImageBitmap，贴上即显示
+            // Frames come from this one stream: the Worker pushes an ImageBitmap per
+            // frame, painted as-is
             const workbench = card.adjustEmission ? createWorkbench(prism, this.workbenchAbort.signal) : null;
             this.stopListening = prism.camera.listen(FRAME_INTERVAL_MS, (bitmap) => {
                 if (!this.context) {
@@ -97,8 +104,9 @@ export class RenderView {
             });
             this.controls.attach(canvas, prism.camera);
 
-            // 编译完成不等于画面已经铺满：采样预算从 4096 像素/帧起步，
-            // 等一小会儿再撤 loading，避免露出半张没光的画面。
+            // Compiled does not mean the frame is filled: the sample budget
+            // starts at 4096 pixels/frame, so wait a moment before hiding the
+            // loading overlay to avoid revealing a half-lit image.
             await new Promise<void>((resolve) => setTimeout(resolve, LOADING_HOLD_MS));
             loading.classList.add('hidden');
         } catch (err) {
@@ -131,7 +139,8 @@ export class RenderView {
         this.stage = null;
     }
 
-    /** 把画布的物理像素尺寸喂给相机（Worker 里读不到 clientWidth / dpr）。 */
+    /** Feed the canvas's physical pixel size to the camera (the Worker cannot read
+     *  clientWidth / dpr). */
     private watchSize(): void {
         const canvas = this.canvas;
         if (!canvas) return;
@@ -139,7 +148,8 @@ export class RenderView {
             const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
             const width = Math.max(1, Math.round(canvas.clientWidth * dpr));
             const height = Math.max(1, Math.round(canvas.clientHeight * dpr));
-            // bitmaprenderer 不会因为贴位图而改宽高属性，这里跟 Worker 保持一致
+            // bitmaprenderer does not change the width/height attributes when a bitmap
+            // is painted, so keep them in sync with the Worker
             canvas.width = width;
             canvas.height = height;
             this.prism?.camera.resize({ width, height });

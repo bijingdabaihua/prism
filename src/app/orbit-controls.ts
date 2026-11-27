@@ -2,27 +2,29 @@ import type { CameraHandle } from '../core/api/prism';
 
 type DragMode = 'orbit' | 'pan' | 'zoom';
 
-/** 指针手感系数：每像素转多少弧度、推拉多快。属于界面，不属于相机语义。 */
+/** Pointer feel constants: radians per pixel and dolly speed. UI concerns, not camera semantics. */
 const ORBIT_PER_PIXEL = 0.008;
 const DRAG_ZOOM_PER_PIXEL = 0.005;
 const WHEEL_ZOOM_IN = 0.9;
 const WHEEL_ZOOM_OUT = 1.1;
 
 /**
- * 画布上的轨道操作：鼠标拖动、滚轮、触屏。
+ * Orbit controls on the canvas: mouse drag, wheel and touch.
  *
- * 鼠标映射照 Blender 的视口：
+ * Mouse mapping follows Blender's viewport:
  *
- *   中键拖       转视角
- *   Shift + 中键 平移
- *   Ctrl/Cmd + 中键  推拉
- *   滚轮         推拉
- *   右键拖       平移
+ *   Middle drag          orbit
+ *   Shift + middle drag  pan
+ *   Ctrl/Cmd + middle    dolly
+ *   Wheel                dolly
+ *   Right drag           pan
  *
- * 左键也留给旋转：Mac 触控板没有中键，不然只剩右键平移、没法转视角了。
- * 触屏单指转，双指捏合推拉。
+ * Left drag also orbits: Mac trackpads have no middle button, otherwise right
+ * drag would be the only option and there would be no way to orbit. One finger
+ * orbits on touch, two-finger pinch dollies.
  *
- * 这里只产出台阶式的相机命令（orbit / pan / zoom），不碰渲染和 DOM 结构。
+ * This only emits discrete camera commands (orbit / pan / zoom); it touches no
+ * rendering or DOM structure.
  */
 export class OrbitControls {
     private camera: CameraHandle | null = null;
@@ -50,7 +52,8 @@ export class OrbitControls {
         } else if (this.mode === 'pan') {
             this.camera?.pan(dx, dy);
         } else {
-            // 往上拖推近：指数映射，拖多远都是等比例，不会突然冲过头
+            // Drag up to dolly in: exponential mapping keeps the rate proportional and
+            // avoids overshooting
             this.camera?.zoom(Math.exp(dy * DRAG_ZOOM_PER_PIXEL));
         }
     };

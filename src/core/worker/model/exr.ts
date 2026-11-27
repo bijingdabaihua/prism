@@ -1,8 +1,10 @@
-/** RGB 或灰度 half / float 扫描行 EXR 解码器；支持未压缩、ZIPS 和 ZIP。 */
+/**
+ * Scanline EXR decoder for RGB or grayscale half/float data; supports uncompressed, ZIPS and ZIP.
+ */
 
 export let decodeExr: (buffer: ArrayBuffer) => Promise<{ width: number; height: number; data: Float32Array }>;
 
-// ═══════════════════════ 实现层（不导出） ═══════════════════════
+// ═════════ Implementation layer (not exported) ══════════
 
 interface Channel {
     name: string;
@@ -17,7 +19,7 @@ decodeExr = async (buffer) => {
     let pos = 0;
 
     function need(count: number): void {
-        if (count < 0 || pos + count > bytes.length) throw new Error('EXR 文件已截断');
+        if (count < 0 || pos + count > bytes.length) throw new Error('EXR file is truncated');
     }
 
     function u32(): number {
@@ -34,10 +36,10 @@ decodeExr = async (buffer) => {
         return textDecoder.decode(bytes.subarray(start, pos++));
     }
 
-    if (u32() !== 0x01312f76) throw new Error('不是 OpenEXR 文件');
+    if (u32() !== 0x01312f76) throw new Error('Not an OpenEXR file');
     const version = u32();
     if ((version & 0xff) !== 2 || (version & ~0xff) !== 0) {
-        throw new Error('仅支持单部分 scanline EXR v2');
+        throw new Error('Only single-part scanline EXR v2 is supported');
     }
 
     const channels: Channel[] = [];
@@ -70,11 +72,11 @@ decodeExr = async (buffer) => {
                 pos += 4;
                 const xSampling = u32();
                 const ySampling = u32();
-                if (xSampling !== 1 || ySampling !== 1) throw new Error('不支持 EXR 通道子采样');
-                if (pixelType !== 1 && pixelType !== 2) throw new Error('仅支持 EXR half/float 通道');
+                if (xSampling !== 1 || ySampling !== 1) throw new Error('EXR channel subsampling is not supported');
+                if (pixelType !== 1 && pixelType !== 2) throw new Error('Only EXR half/float channels are supported');
                 channels.push({ name: channelName, type: pixelType, bytes: pixelType === 1 ? 2 : 4 });
             }
-            if (pos !== end - 1) throw new Error('EXR 通道列表损坏');
+            if (pos !== end - 1) throw new Error('EXR channel list is corrupt');
         } else if (name === 'type' && type === 'string') {
             imageType = textDecoder.decode(bytes.subarray(pos, pos + size));
         } else if (name === 'lineOrder' && type === 'lineOrder' && size === 1) {
@@ -83,13 +85,13 @@ decodeExr = async (buffer) => {
         pos = start + size;
     }
 
-    if (!(width > 0 && height > 0) || width * height > 100_000_000) throw new Error('EXR 图像尺寸无效');
-    if (imageType && imageType !== 'scanlineimage') throw new Error(`不支持的 EXR 图像类型 ${imageType}`);
-    if (lineOrder !== 0 && lineOrder !== 1 && lineOrder !== 2) throw new Error('EXR 扫描行顺序无效');
-    if (![0, 2, 3].includes(compression)) throw new Error(`不支持的 EXR 压缩类型 ${compression}`);
+    if (!(width > 0 && height > 0) || width * height > 100_000_000) throw new Error('Invalid EXR image size');
+    if (imageType && imageType !== 'scanlineimage') throw new Error(`Unsupported EXR image type ${imageType}`);
+    if (lineOrder !== 0 && lineOrder !== 1 && lineOrder !== 2) throw new Error('Invalid EXR line order');
+    if (![0, 2, 3].includes(compression)) throw new Error(`Unsupported EXR compression type ${compression}`);
     const grayscale = channels.length === 1 && channels[0].name === 'Y';
     if (!grayscale && !['R', 'G', 'B'].every((name) => channels.some((channel) => channel.name === name))) {
-        throw new Error('EXR 缺少 RGB 或灰度 Y 通道');
+        throw new Error('EXR is missing RGB or grayscale Y channels');
     }
 
     const linesPerBlock = compression === 3 ? 16 : 1;
@@ -99,7 +101,7 @@ decodeExr = async (buffer) => {
         need(8);
         const offset = Number(view.getBigUint64(pos, true));
         pos += 8;
-        if (!Number.isSafeInteger(offset) || offset + 8 > bytes.length) throw new Error('EXR 块偏移无效');
+        if (!Number.isSafeInteger(offset) || offset + 8 > bytes.length) throw new Error('Invalid EXR block offset');
         offsets.push(offset);
     }
 
@@ -110,23 +112,23 @@ decodeExr = async (buffer) => {
         const row = view.getInt32(offset, true) - yMin;
         const size = view.getUint32(offset + 4, true);
         const lines = Math.min(linesPerBlock, height - row);
-        if (row < 0 || lines <= 0 || offset + 8 + size > bytes.length) throw new Error('EXR 扫描行块无效');
+        if (row < 0 || lines <= 0 || offset + 8 + size > bytes.length) throw new Error('Invalid EXR scanline block');
         if (row % linesPerBlock !== 0 || seen[Math.floor(row / linesPerBlock)]++) {
-            throw new Error('EXR 扫描行块重复或未对齐');
+            throw new Error('EXR scanline block is duplicated or misaligned');
         }
         const expected = stride * lines;
         let raw = bytes.subarray(offset + 8, offset + 8 + size);
         if (compression !== 0 && size < expected) {
             const stream = new Blob([new Uint8Array(raw)]).stream().pipeThrough(new DecompressionStream('deflate'));
             raw = new Uint8Array(await new Response(stream).arrayBuffer());
-            if (raw.length !== expected) throw new Error('EXR 解压后长度不符');
+            if (raw.length !== expected) throw new Error('EXR decompressed length mismatch');
             for (let i = 1; i < raw.length; i++) raw[i] = raw[i - 1] + raw[i] - 128;
             const interleaved = new Uint8Array(raw.length);
             const half = Math.ceil(raw.length / 2);
             for (let i = 0; i < raw.length; i++) interleaved[i] = raw[(i & 1) ? half + (i >> 1) : i >> 1];
             raw = interleaved;
         }
-        if (raw.length !== expected) throw new Error('EXR 块长度不符');
+        if (raw.length !== expected) throw new Error('EXR block length mismatch');
         const block = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
         for (let line = 0; line < lines; line++) {
             let channelOffset = line * stride;
@@ -150,7 +152,7 @@ decodeExr = async (buffer) => {
             }
         }
     }
-    if (seen.some((count) => count !== 1)) throw new Error('EXR 缺少扫描行块');
+    if (seen.some((count) => count !== 1)) throw new Error('EXR is missing scanline blocks');
     return { width, height, data };
 };
 

@@ -4,9 +4,9 @@ import { RenderView } from './render-view';
 import { UnsupportedView } from './unsupported';
 
 /**
- * 路由：`#/` 是画廊，`#/render/<key>` 是渲染页。
+ * Routing: `#/` is the gallery, `#/render/<key>` is the render page.
  *
- * 只用 hash —— 静态托管不需要任何服务端重写规则。
+ * Hash-only — static hosting needs no server rewrite rules.
  */
 
 interface View {
@@ -50,7 +50,8 @@ function show(hash: string): void {
     currentId = id;
 
     if (route.name === 'render') {
-        // 画廊本身就是静态图，没有 WebGPU 也能看；只有渲染页必须降级。
+        // The gallery is static images and works without WebGPU; only the render page
+        // must fall back.
         const card = SCENE_CARDS[route.key];
         if (!navigator.gpu) {
             const view = new UnsupportedView(card);
@@ -61,7 +62,8 @@ function show(hash: string): void {
 
         let view: RenderView;
         view = new RenderView(route.key, () => {
-            // 有 API 但拿不到设备（驱动黑名单 / 关了硬件加速）：同样走降级页
+            // API present but no device available (driver blocklist / hardware
+            // acceleration off): fall back as well
             if (current !== view) return;
             view.unmount();
             const unsupported = new UnsupportedView(card);

@@ -1,54 +1,58 @@
 /**
- * 主线程环境光句柄：主线程只提供字节，格式识别 / 解码 / 上传都在 Worker。
- * 文件分两层：契约层（全部导出）+ 实现层（全部不导出），规范见 AGENTS.md。
+ * Main-thread environment-map handle. The main thread only supplies bytes;
+ * format detection, decoding and upload all happen in the Worker.
+ * The file has two layers: contract (all exports) and implementation (no exports);
+ * see AGENTS.md for the convention.
  */
 
-// ══════════════════════════ 契约层（导出） ══════════════════════════
+// ══════════════════ Contract layer (exports) ═════════════════
 
 /**
- * 构造主线程环境光句柄；返回的是契约接口，实现类不导出。
- * Blob 交给 Worker 去解码、上传 —— 主线程只负责提供字节。
- * 此处只有声明，赋值在实现层。
+ * Creates the main-thread environment-map handle; returns the contract interface, and the
+ * implementation class is not exported.
+ * The Blob is handed to the Worker for decoding and upload — the main thread only supplies bytes.
+ * This is only a declaration; the assignment lives in the implementation layer.
  */
 export let createBackground: (rpc: BackgroundRpc) => BackgroundHandle;
 
 /**
- * 环境光句柄 —— 环境图的远程入口。
+ * Environment-map handle — the remote entry point for the environment map.
  */
 export interface BackgroundHandle {
     /**
-     * 设置环境图（Blob）。Worker 负责格式识别、解码和上传；每次换图都从
-     * 原图方向开始，需要朝向就调用 `setRotation`。Promise 解决时纹理和
-     * CDF 已经就位。
+     * Sets the environment map (Blob). The Worker handles format detection, decoding and upload.
+     * Every change starts from the original orientation; call `setRotation` if you need a heading.
+     * When the Promise resolves, the texture and CDF are in place.
      */
     setImage(blob: Blob): Promise<void>;
     /**
-     * 旋转当前环境图（绕 +y 的弧度）。需要先 setImage；转完纹理和 CDF 一起
-     * 重建，Promise 解决时已经生效。
+     * Rotates the current environment map (radians around +y). Requires a prior `setImage`;
+     * when done the texture and CDF are rebuilt together, and the Promise resolves once in effect.
      */
     setRotation(rotation: number): Promise<void>;
 }
 
 /**
- * 环境光句柄依赖的最小 RPC 面：一次带返回值的请求。
- * `build` 产出要发给 Worker 的请求消息（形状见本层 BackgroundRequest），
- * 对契约层不透明。
+ * The minimal RPC surface the environment-map handle depends on: one request with a return value.
+ * `build` produces the request message to send to the Worker (shape defined in this layer's
+ * `BackgroundRequest`), opaque to the contract layer.
  */
 export interface BackgroundRpc {
     request<T>(build: (id: number) => BackgroundRequest): Promise<T>;
 }
 
 /**
- * 环境光相关的 Worker 消息报文。
- * 报文形状不是对外契约，但 prism 的消息分发联合需要枚举它，因此导出、归本层。
+ * Worker messages related to environment lighting.
+ * The message shape is not part of the public contract, but the Prism message-dispatch union
+ * needs to enumerate it, so it is exported and belongs in this layer.
  */
 export type BackgroundRequest =
     | { type: 'background/setImage'; id: number; blob: Blob }
     | { type: 'background/setRotation'; id: number; rotation: number };
 
-// ══════════════════════════ 实现层（不导出） ══════════════════════════
+// ═════════════ Implementation layer (not exported) ════════════
 
-/** 环境光句柄的主线程实现。 */
+/** Main-thread implementation of the environment-map handle. */
 class RpcBackground implements BackgroundHandle {
     constructor(private readonly rpc: BackgroundRpc) {}
 
@@ -61,5 +65,5 @@ class RpcBackground implements BackgroundHandle {
     }
 }
 
-/** 契约层构造入口的赋值。 */
+/** Assignment for the contract layer's factory entry point. */
 createBackground = (rpc) => new RpcBackground(rpc);

@@ -5,21 +5,25 @@ import { MeshBuilder } from '../core/worker/model/mesh';
 import type { TiledGroundGeometry } from './catalog';
 
 /**
- * 砂土地面 —— 荒地场景的地表。
+ * Dirt ground — the surface of the wasteland scene.
  *
- * 一张平面铺不出这个场景：低机位下画面顶端几乎贴着地平线，一片 1 m 见方的
- * 板 2 m 外就被看见边了。所以这里是「一块地砖 + 实例化」，见 `buildTiledGround`。
+ * A single plane cannot cover this scene: at a low camera angle the top of the
+ * frame nearly touches the horizon, and the edge of a 1 m square slab becomes
+ * visible just 2 m away. So this is "one ground tile + instancing"; see
+ * `buildTiledGround`.
  *
- * 材质全在压缩包里（`.blend` + 贴图目录）—— 四张贴图、色彩空间、法线强度、
- * 位移的 Midlevel / Scale 都是作者填的。这里只给一个文件读不出来的数：一格
- * 贴图多大（Poly Haven 把它放在网页 API 的 `dimensions` 里，不在 .blend 中），
- * 它来自配方。
+ * The material all lives in the archive (`.blend` + texture directory) — the
+ * four textures, color space, normal strength and displacement Midlevel / Scale
+ * are all authored values. This file supplies only the number a file cannot
+ * provide: how large one texture tile is (Poly Haven exposes it as `dimensions`
+ * in its web API, not in the .blend), taken from the recipe.
  *
- * 位移是材质的属性，不是几何的属性：这里只铺一张平的四边形，细分和抬起
- * 由 `Mesh.evolve` 在编译时做。
+ * Displacement is a property of the material, not the geometry: only a flat quad
+ * is laid out here; tessellation and lifting happen at compile time in
+ * `Mesh.evolve`.
  */
 
-/** 水平四边形，绕序保证法线朝 +y（和 addQuad 的约定一致）。 */
+/** Horizontal quad; winding keeps the normal facing +y (matching addQuad's convention). */
 function groundQuad(x0: number, x1: number, z0: number, z1: number): [Vec3, Vec3, Vec3, Vec3] {
     return [
         { x: x0, y: 0, z: z1 },
@@ -30,28 +34,38 @@ function groundQuad(x0: number, x1: number, z0: number, z1: number): [Vec3, Vec3
 }
 
 /**
- * 用一块地砖铺出的大地面：一块 mesh、很多实例、共用一棵 BLAS。
+ * A large ground paved from one tile: one mesh, many instances, sharing one
+ * BLAS.
  *
- * 为什么切开：4 mm 一格的大地面没法一次切出来。42 m 见方是 2 亿个三角形，
- * 光顶点就 3 GB。切成小砖之后，几何只算一份（荒地的一块约 52 万三角形），
- * 铺多少块都只多一张实例表 —— `blasCache` 按 mesh 缓存，实例之间共享同一棵树。
+ * Why split it up: a ground with 4 mm tiles cannot be cut in one go. A 42 m
+ * square is 200 million triangles and 3 GB of vertices alone. Cut into small
+ * tiles, the geometry is computed once (about 520k triangles for one wasteland
+ * tile), and every additional tile only adds an instance entry — `blasCache`
+ * caches per mesh, so instances share the same tree.
  *
- * 为什么砖边长必须等于贴图周期：位移是从贴图上采样的，贴图每 `tile` 米
- * 重复一次。砖边长等于这个周期时，相邻砖边界上的 UV 正好从 `tile` 接回 0，
- * 两边采到的高度相同，位移和图案都自己接上 —— 铺出来的结果和「一整块大地」
- * 逐顶点一样。荒地用 2.11 m；换成整数 2 m，缝上就错开 0.11 m，又是一条线。
+ * Why the tile edge must equal the texture period: displacement is sampled from
+ * the texture, which repeats every `tile` meters. When the tile edge equals that
+ * period, the UVs at neighboring tile boundaries wrap from `tile` back to 0,
+ * both sides sample the same height, and the displacement and pattern join up on
+ * their own — the paved result matches a single large ground vertex for vertex.
+ * The wasteland uses 2.11 m; with an integer 2 m the seams shift by 0.11 m and
+ * draw a visible line.
  *
- * 砖中心落在 (i·tile, 0, j·tile) 上，所以原点是砖心，罐子正好踩在中间那块上。
- * 范围按**砖心**取舍：中心落在 [x0, x1] 里的砖才有。两段地面用相邻的
- * x0 / x1 调，就正好在一条砖缝上接上，既不重叠也不留缝。
+ * Tile centers sit at (i·tile, 0, j·tile), so the origin is a tile center and the
+ * jar stands exactly on the middle tile. The range is selected by **tile
+ * center**: only tiles whose center falls in [x0, x1] are kept. Two ground
+ * sections adjusted with adjacent x0 / x1 meet exactly on a tile seam, with no
+ * overlap and no gap.
  *
- * 材质压缩包由调用方取好再传进来：这个文件只管造几何，不做网络。
+ * The material archive is fetched by the caller and passed in: this file only
+ * builds geometry and does no networking.
  */
 export async function buildTiledGround(
     materialZip: Blob,
     recipe: TiledGroundGeometry,
 ): Promise<Instance[]> {
-    // tile 同时决定 UV 缩放和砖边长；.blend 里读不出这个数，构造后矫正
+    // tile sets both UV scale and tile edge length; the .blend cannot supply it,
+    // so correct it after construction
     const material = (await PBRMaterial.buildByBlend(materialZip)).retile(recipe.tile);
     const h = recipe.tile * 0.5;
     const builder = new MeshBuilder();

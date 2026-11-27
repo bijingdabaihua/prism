@@ -1,7 +1,8 @@
 import { SCENE_CARDS } from './catalog';
 
 /**
- * 画廊 —— 打开就能看到的东西。一张卡片一个场景，点进去实时渲染。
+ * The gallery — the first thing you see. One card per scene; click through to
+ * render in real time.
  */
 export class GalleryView {
     private root: HTMLElement | null = null;
@@ -14,16 +15,16 @@ export class GalleryView {
         head.className = 'gallery-head';
         head.innerHTML = `
             <h1>Prism</h1>
-            <p>WebGPU 路径追踪器 · 从零实现的 BVH、NEE + MIS、渐进累积</p>
+            <p>WebGPU path tracer · BVH, NEE + MIS and progressive accumulation built from scratch</p>
         `;
         root.appendChild(head);
 
-        // 没 WebGPU 就把话说在前面，免得点进去才发现。
+        // Warn up front without WebGPU, so visitors don't discover it only after clicking through.
         if (!navigator.gpu) {
             const notice = document.createElement('div');
             notice.className = 'gallery-notice';
             notice.textContent =
-                '这个浏览器没有 WebGPU，点进去只能看到静态截图 —— 换 Chrome 113+ 或 Safari 18+ 才能实时渲染。';
+                'This browser doesn’t support WebGPU, so a scene would open to a static screenshot — switch to Chrome 113+ or Safari 18+ for real-time rendering.';
             root.appendChild(notice);
         }
 
@@ -37,7 +38,7 @@ export class GalleryView {
 
         const foot = document.createElement('footer');
         foot.className = 'gallery-foot';
-        foot.textContent = '每张图都是实时渲染：左键拖拽旋转 · 滚轮缩放 · 右键拖拽平移';
+        foot.textContent = 'Every image renders in real time: drag with the left button to orbit · scroll to zoom · drag with the right button to pan';
         root.appendChild(foot);
 
         container.appendChild(root);
@@ -63,13 +64,14 @@ export class GalleryView {
             img.src = info.cover;
             img.alt = info.title;
             img.loading = 'lazy';
-            // 封面不存在时保持底纹，不要出现浏览器默认的破图图标
+            // Keep the placeholder pattern when the cover is missing instead of the
+            // browser's broken-image icon
             img.addEventListener('error', () => img.remove());
             cover.appendChild(img);
         }
         const badge = document.createElement('span');
         badge.className = 'card-badge';
-        badge.textContent = '实时渲染 →';
+        badge.textContent = 'Real-time →';
         cover.appendChild(badge);
         card.appendChild(cover);
 
