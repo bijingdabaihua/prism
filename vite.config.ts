@@ -4,10 +4,6 @@ export default defineConfig({
   // Read Vite env files from the repo root; the page entry stays in src/app.
   envDir: '../..',
   root: 'src/app',
-  // GitHub Pages project sites are served under /prism/; local dev and plain static
-  // hosting stay at the root. Only builds in Actions get the prefix, so local
-  // `npm run build` output can still be previewed directly.
-  base: process.env.GITHUB_ACTIONS ? '/prism/' : '/',
   // Assets (models / textures / environment maps / gallery covers) are published
   // as-is to the site root
   publicDir: '../../assets',

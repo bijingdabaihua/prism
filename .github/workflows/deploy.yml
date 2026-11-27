@@ -31,9 +31,8 @@ jobs:
       - run: npm ci
 
       # Build output is in dist/app (vite outDir is ../../dist/app).
-      # With GITHUB_ACTIONS=true, vite.config.ts sets base to /prism/, so JS / Worker /
-      # static assets resolve correctly under the project page path.
-      - run: npm run build
+      # GitHub Pages project sites are served under /prism/.
+      - run: npm run build -- --base=/prism/
         env:
           VITE_PUBLIC_DEEPSEEK_API_KEY: ${{ vars.VITE_PUBLIC_DEEPSEEK_API_KEY }}
 
